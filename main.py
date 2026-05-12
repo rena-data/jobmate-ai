@@ -11,6 +11,7 @@ from rich.table import Table
 import config
 from parsers.base import canonicalize_url, check_robots_txt, JobPost
 from parsers.wanted import WantedParser
+from parsers.saramin import SaraminParser
 from parsers.fallback import FallbackParser
 import sheets
 import slack
@@ -21,6 +22,7 @@ console = Console()
 # 파서 등록 (우선순위 순)
 PARSERS = [
     WantedParser(),
+    SaraminParser(),
     FallbackParser(),  # 항상 마지막 (폴백)
 ]
 
