@@ -8,7 +8,9 @@ from datetime import datetime
 
 import typer
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 import config
 
@@ -27,7 +29,10 @@ from parsers.fallback import FallbackParser
 import sheets
 import slack
 
-app = typer.Typer(help="JobMate AI - 채용 공고 자동 수집/관리 CLI")
+app = typer.Typer(
+    help="JobMate AI - 채용 공고 자동 수집/관리 CLI",
+    invoke_without_command=True,
+)
 console = Console()
 
 # 파서 등록 (우선순위 순)
@@ -36,6 +41,150 @@ PARSERS = [
     SaraminParser(),
     FallbackParser(),  # 항상 마지막 (폴백)
 ]
+
+
+@app.callback()
+def main(ctx: typer.Context):
+    """JobMate AI - 채용 공고 자동 수집/관리 CLI"""
+    if ctx.invoked_subcommand is not None:
+        return
+
+    # 서브명령 없이 실행 → 인터랙티브 모드
+    _interactive_mode()
+
+
+def _interactive_mode():
+    """인터랙티브 모드: URL 입력 프롬프트를 반복 표시."""
+    console.print()
+    console.print(Panel(
+        "[bold cyan]JobMate AI[/bold cyan]\n"
+        "[dim]채용 공고 URL을 붙여넣으세요. 자동으로 분석하여 Google Sheets에 저장합니다.[/dim]\n\n"
+        "[dim]명령어:  url 붙여넣기 → 공고 추가  |  list → 목록  |  notify → 알림  |  q → 종료[/dim]",
+        border_style="cyan",
+    ))
+    console.print()
+
+    while True:
+        try:
+            user_input = console.input("[bold cyan]>> [/bold cyan]").strip()
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]종료합니다.[/dim]")
+            break
+
+        if not user_input:
+            continue
+
+        cmd = user_input.lower()
+
+        if cmd in ("q", "quit", "exit"):
+            console.print("[dim]종료합니다.[/dim]")
+            break
+        elif cmd == "list":
+            list_posts()
+            console.print()
+        elif cmd == "notify":
+            notify(auto=False)
+            console.print()
+        elif cmd.startswith("status "):
+            parts = cmd.split(None, 2)
+            if len(parts) == 3:
+                status(url=parts[1], new_status=parts[2])
+            else:
+                console.print("[dim]사용법: status <url> <상태>[/dim]")
+            console.print()
+        elif cmd == "help":
+            console.print(
+                "[dim]url 붙여넣기 → 공고 추가  |  list → 목록  |  notify → 알림\n"
+                "status <url> <상태> → 상태 변경  |  q → 종료[/dim]"
+            )
+            console.print()
+        elif user_input.startswith("http"):
+            # URL로 판단 → add 실행
+            _add_url(user_input)
+            console.print()
+        else:
+            console.print("[yellow]URL을 입력하거나 명령어를 입력해주세요. (help로 도움말)[/yellow]")
+            console.print()
+
+
+def _add_url(url: str):
+    """인터랙티브 모드에서 URL 추가 실행."""
+    canonical = canonicalize_url(url)
+
+    if _is_cached(canonical):
+        console.print(f"[yellow]이미 등록된 URL입니다: {canonical}[/yellow]")
+        return
+
+    if config.CHECK_ROBOTS_TXT:
+        allowed, status_msg = check_robots_txt(canonical)
+        console.print(f"[dim]robots.txt: {status_msg}[/dim]")
+        if not allowed:
+            console.print(f"[yellow]robots.txt에서 접근이 제한된 URL입니다.[/yellow]")
+            return
+
+    if config.REQUEST_DELAY_SECONDS > 0:
+        console.print(f"[dim]요청 딜레이 {config.REQUEST_DELAY_SECONDS}초...[/dim]")
+        time.sleep(config.REQUEST_DELAY_SECONDS)
+
+    parser = None
+    for p in PARSERS:
+        if p.can_handle(canonical):
+            parser = p
+            parser_name = type(p).__name__
+            break
+
+    if parser is None:
+        console.print("[red]지원하지 않는 URL입니다.[/red]")
+        return
+
+    console.print(f"[cyan]수집 중... (파서: {parser_name})[/cyan]")
+    logger.info(f"add 시작 (interactive): {url}")
+
+    try:
+        post = asyncio.run(parser.parse(canonical))
+    except KeyboardInterrupt:
+        console.print("\n[dim]취소되었습니다.[/dim]")
+        return
+    except TimeoutError:
+        console.print("[red]페이지 로딩 시간 초과.[/red]")
+        return
+    except Exception as e:
+        error_msg = str(e)
+        if "net::ERR" in error_msg or "Timeout" in error_msg:
+            console.print("[red]네트워크 오류. 인터넷 연결을 확인해주세요.[/red]")
+        else:
+            console.print(f"[red]크롤링 실패: {error_msg}[/red]")
+
+        if parser_name != "FallbackParser":
+            console.print("[yellow]Gemini 폴백으로 재시도합니다...[/yellow]")
+            try:
+                post = asyncio.run(FallbackParser().parse(canonical))
+            except Exception as e2:
+                console.print(f"[red]폴백도 실패: {e2}[/red]")
+                return
+        else:
+            return
+
+    _display_preview(post)
+
+    confirm = typer.confirm("Google Sheets에 저장하시겠습니까?")
+    if not confirm:
+        console.print("[dim]저장을 취소했습니다.[/dim]")
+        return
+
+    try:
+        sheets.save_job_post(post)
+        _add_to_cache(post)
+        logger.info(f"저장 완료 (interactive): {post.company} - {post.position}")
+        console.print("[green]Google Sheets에 저장 완료![/green]")
+    except PermissionError:
+        console.print("[red]Google Sheets 권한 오류.[/red]")
+    except Exception as e:
+        error_msg = str(e)
+        if "quota" in error_msg.lower():
+            console.print("[red]Google Sheets API 한도 초과.[/red]")
+        else:
+            console.print(f"[red]저장 실패: {error_msg}[/red]")
 
 
 def _load_cache() -> list[dict]:
