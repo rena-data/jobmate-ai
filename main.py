@@ -9,8 +9,8 @@ from datetime import datetime
 import typer
 from rich.console import Console
 from rich.panel import Panel
+from rich.status import Status
 from rich.table import Table
-from rich.text import Text
 
 import config
 
@@ -80,7 +80,7 @@ def _interactive_mode():
             console.print("[dim]종료합니다.[/dim]")
             break
         elif cmd == "list":
-            list_posts()
+            list_posts(online=True)
             console.print()
         elif cmd == "notify":
             notify(auto=False)
@@ -137,11 +137,11 @@ def _add_url(url: str):
         console.print("[red]지원하지 않는 URL입니다.[/red]")
         return
 
-    console.print(f"[cyan]수집 중... (파서: {parser_name})[/cyan]")
     logger.info(f"add 시작 (interactive): {url}")
 
     try:
-        post = asyncio.run(parser.parse(canonical))
+        with console.status(f"[cyan]수집 중... (파서: {parser_name})[/cyan]", spinner="dots"):
+            post = asyncio.run(parser.parse(canonical))
     except KeyboardInterrupt:
         console.print("\n[dim]취소되었습니다.[/dim]")
         return
@@ -158,7 +158,8 @@ def _add_url(url: str):
         if parser_name != "FallbackParser":
             console.print("[yellow]Gemini 폴백으로 재시도합니다...[/yellow]")
             try:
-                post = asyncio.run(FallbackParser().parse(canonical))
+                with console.status("[cyan]폴백 수집 중...[/cyan]", spinner="dots"):
+                    post = asyncio.run(FallbackParser().parse(canonical))
             except Exception as e2:
                 console.print(f"[red]폴백도 실패: {e2}[/red]")
                 return
@@ -414,28 +415,72 @@ def status(
 
 
 @app.command(name="list")
-def list_posts():
+def list_posts(
+    online: bool = typer.Option(False, "--online", "-o", help="Google Sheets에서 최신 데이터 조회"),
+):
     """저장된 공고 목록을 표시합니다."""
-    cache = _load_cache()
-    if not cache:
-        console.print("[dim]저장된 공고가 없습니다.[/dim]")
-        raise typer.Exit()
+    if online:
+        try:
+            with console.status("[cyan]Sheets에서 조회 중...[/cyan]", spinner="dots"):
+                records = sheets.get_all_posts()
+        except Exception as e:
+            console.print(f"[red]시트 조회 실패: {e}[/red]")
+            raise typer.Exit(1)
 
-    table = Table(title=f"저장된 공고 ({len(cache)}건)")
-    table.add_column("#", style="dim", width=4)
-    table.add_column("회사", style="bold")
-    table.add_column("포지션")
-    table.add_column("등록일")
+        if not records:
+            console.print("[dim]저장된 공고가 없습니다.[/dim]")
+            raise typer.Exit()
 
-    for i, item in enumerate(cache, 1):
-        table.add_row(
-            str(i),
-            item.get("company", ""),
-            item.get("position", ""),
-            item.get("last_seen", ""),
-        )
+        STATUS_STYLE = {
+            "interest": "[dim]관심[/dim]",
+            "applied": "[green]지원완료[/green]",
+            "interview": "[cyan]면접[/cyan]",
+            "closed": "[red]마감[/red]",
+        }
 
-    console.print(table)
+        table = Table(title=f"저장된 공고 ({len(records)}건)")
+        table.add_column("#", style="dim", width=4)
+        table.add_column("회사", style="bold")
+        table.add_column("포지션", max_width=30)
+        table.add_column("마감일", width=12)
+        table.add_column("상태", width=8)
+        table.add_column("등록일", width=12)
+
+        for i, row in enumerate(records, 1):
+            status_val = str(row.get("상태", ""))
+            status_display = STATUS_STYLE.get(status_val, status_val)
+            deadline = str(row.get("마감일(파싱)", "")) or str(row.get("마감일(원본)", "-"))
+            table.add_row(
+                str(i),
+                str(row.get("회사명", "")),
+                str(row.get("포지션", "")),
+                deadline,
+                status_display,
+                str(row.get("등록일", "")),
+            )
+
+        console.print(table)
+    else:
+        cache = _load_cache()
+        if not cache:
+            console.print("[dim]저장된 공고가 없습니다. (--online으로 Sheets에서 조회 가능)[/dim]")
+            raise typer.Exit()
+
+        table = Table(title=f"저장된 공고 ({len(cache)}건)")
+        table.add_column("#", style="dim", width=4)
+        table.add_column("회사", style="bold")
+        table.add_column("포지션")
+        table.add_column("등록일")
+
+        for i, item in enumerate(cache, 1):
+            table.add_row(
+                str(i),
+                item.get("company", ""),
+                item.get("position", ""),
+                item.get("last_seen", ""),
+            )
+
+        console.print(table)
 
 
 if __name__ == "__main__":

@@ -172,13 +172,14 @@ class SaraminParser(BaseParser):
 
     def _extract_industry(self, soup: BeautifulSoup, text: str) -> str:
         """업종 추출."""
-        # "업종" 라벨 다음의 값
-        m = re.search(r"업종\s+(.+?)(?:\n|직종|$)", text)
+        # "업종" 라벨 다음의 값 (탭/공백/줄바꿈 구분)
+        m = re.search(r"업종[\s\t]+(.+?)(?:\n|직종|선택|$)", text)
         if m:
             industry = m.group(1).strip()
-            # ">" 구분자 정리
+            # "솔루션·SI > SI·시스템통합" → 마지막 세그먼트
             if ">" in industry:
                 parts = [p.strip() for p in industry.split(">")]
                 return parts[-1] if parts else industry
+            # "·" 구분자 (예: "솔루션·SI·ERP")
             return industry[:50]
         return ""

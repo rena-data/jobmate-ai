@@ -42,6 +42,12 @@ def is_url_exists(url: str) -> bool:
     return url in urls
 
 
+def get_all_posts() -> list[dict]:
+    """시트에서 모든 공고를 조회."""
+    ws = _get_sheet()
+    return ws.get_all_records()
+
+
 def save_job_post(post: JobPost) -> None:
     """JobPost를 Google Sheets에 저장."""
     ws = _get_sheet()

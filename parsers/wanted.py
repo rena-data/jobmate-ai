@@ -244,7 +244,15 @@ class WantedParser(BaseParser):
         """마감일 추출."""
         text = soup.get_text()
 
-        # "마감일", "마감", "기한" 근처 텍스트
+        # 1. "D-12" 형태 (원티드 제목 옆에 표시)
+        d_match = re.search(r"\(D-(\d+)\)", text)
+        if d_match:
+            from datetime import date, timedelta
+            days_left = int(d_match.group(1))
+            deadline = date.today() + timedelta(days=days_left)
+            return deadline.strftime("%Y-%m-%d")
+
+        # 2. 날짜 형태 마감일
         patterns = [
             r"마감일?\s*[:：]?\s*(.+?)(?:\n|$)",
             r"접수\s*기간?\s*[:：]?\s*(.+?)(?:\n|$)",
@@ -254,11 +262,15 @@ class WantedParser(BaseParser):
             m = re.search(pat, text)
             if m:
                 result = m.group(1).strip()
-                if len(result) < 50:
+                if len(result) < 50 and result not in ("없음", ""):
                     return result
 
-        # "상시채용" 패턴
+        # 3. "상시채용" 패턴
         if re.search(r"상시\s*채용|수시\s*채용|채용\s*시\s*마감", text):
             return "상시채용"
+
+        # 4. "해당 포지션은 마감되었습니다" 패턴
+        if re.search(r"마감되었습니다|지원마감", text):
+            return "마감됨"
 
         return ""

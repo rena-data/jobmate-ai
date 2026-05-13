@@ -172,23 +172,42 @@ GOOGLE_SERVICE_ACCOUNT_FILE=credentials.json
 
 > 매번 사용 전에 가상환경을 활성화해야 합니다: `source .venv/bin/activate`
 
-## 공고 추가하기
+## 인터랙티브 모드 (추천)
 
-원하는 채용 공고의 URL을 복사해서 아래처럼 입력합니다:
+가장 간편한 사용법입니다. 프로그램을 실행하면 URL 입력창이 나타납니다.
 
 ```bash
-python main.py add "채용공고URL"
-```
-
-예시:
-```bash
-python main.py add "https://www.wanted.co.kr/wd/258066"
+python main.py
 ```
 
 실행하면 이렇게 보입니다:
 
 ```
-수집 중... (파서: WantedParser)
+╭──────────────────────────────────────────────────────╮
+│ JobMate AI                                           │
+│ 채용 공고 URL을 붙여넣으세요.                        │
+│                                                      │
+│ url 붙여넣기 | list | notify | status | q → 종료     │
+╰──────────────────────────────────────────────────────╯
+
+>> (여기에 URL을 붙여넣으세요)
+```
+
+| 입력 | 동작 |
+|------|------|
+| URL 붙여넣기 | 공고 분석 → 미리보기 → 저장 |
+| `list` | 저장된 공고 목록 (Sheets에서 최신 조회) |
+| `notify` | 마감 임박 공고 Slack 알림 |
+| `status URL applied` | 공고 상태 변경 |
+| `help` | 도움말 |
+| `q` | 종료 |
+
+URL을 붙여넣으면 자동으로 분석이 시작됩니다:
+
+```
+>> https://www.wanted.co.kr/wd/258066
+
+⠋ 수집 중... (파서: WantedParser)
 
 ┌─────────────┬──────────────────────────────────────────────┐
 │ 항목        │ 내용                                         │
@@ -202,23 +221,47 @@ python main.py add "https://www.wanted.co.kr/wd/258066"
 
 Google Sheets에 저장하시겠습니까? [y/n]: y
 Google Sheets에 저장 완료!
+
+>> (다음 URL을 바로 붙여넣기 가능)
 ```
 
-> 같은 URL을 다시 입력하면 "이미 등록된 URL입니다"라고 알려줍니다. 중복 저장 걱정 없습니다.
+> 같은 URL을 다시 입력하면 "이미 등록된 URL입니다"라고 알려줍니다.
 
-## 저장된 공고 목록 보기
+## 직접 명령어 사용
+
+인터랙티브 모드 대신 명령어를 직접 입력할 수도 있습니다.
 
 ```bash
+# 공고 추가
+python main.py add "https://www.wanted.co.kr/wd/258066"
+
+# 확인 없이 바로 저장
+python main.py add "https://www.wanted.co.kr/wd/258066" --yes
+
+# 저장된 공고 목록 (로컬 캐시)
 python main.py list
-```
 
-## 마감 알림 보내기 (수동)
+# 저장된 공고 목록 (Sheets에서 최신 조회, 상태 포함)
+python main.py list --online
 
-```bash
+# 공고 상태 변경
+python main.py status "공고URL" applied
+
+# 마감 임박 알림 (수동)
 python main.py notify
+
+# 마감 임박 알림 (자동, cron용)
+python main.py notify --auto
 ```
 
-마감 2일 이내인 공고가 있으면 목록을 보여주고, Slack으로 보낼지 물어봅니다.
+### 상태 종류
+
+| 상태 | 의미 |
+|------|------|
+| `interest` | 관심 (기본값) |
+| `applied` | 지원 완료 |
+| `interview` | 면접 예정 |
+| `closed` | 마감/종료 |
 
 ## 매일 자동으로 알림 받기 (선택사항)
 
@@ -265,20 +308,21 @@ crontab -e
 
 ```
 jobmate-ai/
-├── main.py              # 메인 프로그램 (add, list, notify 명령어)
+├── main.py              # 메인 프로그램 (인터랙티브 모드 + add/list/notify/status)
 ├── config.py            # 설정값
 ├── sheets.py            # Google Sheets 연동
 ├── slack.py             # Slack 알림
-├── cache.json           # 중복 방지용 캐시
+├── cache.json           # 중복 방지용 캐시 (GitHub 제외)
+├── jobmate.log          # 실행 로그 (GitHub 제외)
 ├── cron_notify.sh       # 자동 알림 스크립트
 ├── .env                 # API 키 등 비밀 정보 (GitHub 제외)
 ├── credentials.json     # Google 인증 파일 (GitHub 제외)
 ├── requirements.txt     # 필요한 라이브러리 목록
 └── parsers/             # 사이트별 크롤링 모듈
-    ├── base.py          # 공통 인터페이스
+    ├── base.py          # 공통 인터페이스 + 유틸리티
     ├── wanted.py        # 원티드 전용
     ├── saramin.py       # 사람인 전용
-    └── fallback.py      # 기타 사이트 (AI 자동 추출)
+    └── fallback.py      # 기타 사이트 (Gemini AI 자동 추출)
 ```
 
 ## Google Sheets에 저장되는 항목
@@ -301,7 +345,7 @@ jobmate-ai/
 
 # 고도화 로드맵
 
-- 잡코리아, 로켓펀치 등 추가 사이트 전용 파서
-- 지원 상태 관리 (관심 → 지원 → 면접 → 결과)
+- 잡코리아, 직행, 로켓펀치 등 Gemini AI 폴백 테스트 및 전용 파서 추가
+- 기업 리뷰 자동 수집
 - JD 기반 자소서 첨삭 AI
 - 로컬 웹 대시보드
