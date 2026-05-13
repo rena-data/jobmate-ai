@@ -2,13 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
+from datetime import datetime
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
 import config
+
+# 파일 로깅 설정
+logging.basicConfig(
+    filename=str(config.LOG_FILE),
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("jobmate")
 from parsers.base import canonicalize_url, check_robots_txt, JobPost
 from parsers.wanted import WantedParser
 from parsers.saramin import SaraminParser
@@ -90,6 +101,7 @@ def add(
     skip_confirm: bool = typer.Option(False, "--yes", "-y", help="확인 없이 바로 저장"),
 ):
     """채용 공고 URL을 분석하여 Google Sheets에 저장합니다."""
+    logger.info(f"add 시작: {url}")
     canonical = canonicalize_url(url)
 
     # 중복 체크
@@ -126,15 +138,24 @@ def add(
 
     try:
         post = asyncio.run(parser.parse(canonical))
+    except KeyboardInterrupt:
+        console.print("\n[dim]취소되었습니다.[/dim]")
+        raise typer.Exit()
+    except TimeoutError:
+        console.print("[red]페이지 로딩 시간 초과. 네트워크 연결을 확인하거나 잠시 후 다시 시도해주세요.[/red]")
+        raise typer.Exit(1)
     except Exception as e:
-        console.print(f"[red]크롤링 실패: {e}[/red]")
+        error_msg = str(e)
+        if "net::ERR" in error_msg or "Timeout" in error_msg:
+            console.print("[red]네트워크 오류. 인터넷 연결을 확인해주세요.[/red]")
+        else:
+            console.print(f"[red]크롤링 실패: {error_msg}[/red]")
 
-        # 원티드 파서 실패 시 폴백 시도
+        # 전용 파서 실패 시 폴백 시도
         if parser_name != "FallbackParser":
             console.print("[yellow]Gemini 폴백으로 재시도합니다...[/yellow]")
             try:
-                fallback = FallbackParser()
-                post = asyncio.run(fallback.parse(canonical))
+                post = asyncio.run(FallbackParser().parse(canonical))
             except Exception as e2:
                 console.print(f"[red]폴백도 실패: {e2}[/red]")
                 raise typer.Exit(1)
@@ -155,9 +176,16 @@ def add(
     try:
         sheets.save_job_post(post)
         _add_to_cache(post)
+        logger.info(f"저장 완료: {post.company} - {post.position}")
         console.print("[green]Google Sheets에 저장 완료![/green]")
+    except PermissionError:
+        console.print("[red]Google Sheets 권한 오류. 서비스 계정 이메일에 편집자 권한을 부여했는지 확인해주세요.[/red]")
     except Exception as e:
-        console.print(f"[red]저장 실패: {e}[/red]")
+        error_msg = str(e)
+        if "quota" in error_msg.lower():
+            console.print("[red]Google Sheets API 한도 초과. 잠시 후 다시 시도해주세요.[/red]")
+        else:
+            console.print(f"[red]저장 실패: {error_msg}[/red]")
         raise typer.Exit(1)
 
 
@@ -166,6 +194,7 @@ def notify(
     auto: bool = typer.Option(False, "--auto", "-a", help="확인 없이 자동 발송 (cron용)"),
 ):
     """마감 D-2 이내 공고를 확인하고 Slack 알림을 발송합니다."""
+    logger.info("notify 실행")
     console.print("[cyan]마감 임박 공고 확인 중...[/cyan]")
 
     try:
@@ -204,9 +233,35 @@ def notify(
                 sheets.mark_notified(job["url"])
             except Exception:
                 pass
+        logger.info(f"Slack 알림 발송 완료: {len(upcoming)}건")
         console.print("[green]Slack 알림 발송 완료![/green]")
     else:
+        logger.error("Slack 발송 실패")
         console.print("[red]Slack 발송 실패[/red]")
+
+
+@app.command()
+def status(
+    url: str = typer.Argument(..., help="상태를 변경할 공고 URL"),
+    new_status: str = typer.Argument(..., help="변경할 상태 (interest / applied / interview / closed)"),
+):
+    """공고의 지원 상태를 변경합니다."""
+    if new_status not in sheets.VALID_STATUSES:
+        console.print(f"[red]유효하지 않은 상태: {new_status}[/red]")
+        console.print(f"[dim]사용 가능: {', '.join(sheets.VALID_STATUSES)}[/dim]")
+        raise typer.Exit(1)
+
+    canonical = canonicalize_url(url)
+    try:
+        updated = sheets.update_status(canonical, new_status)
+    except Exception as e:
+        console.print(f"[red]상태 변경 실패: {e}[/red]")
+        raise typer.Exit(1)
+
+    if updated:
+        console.print(f"[green]상태 변경 완료: {new_status}[/green]")
+    else:
+        console.print(f"[yellow]해당 URL을 찾을 수 없습니다: {canonical}[/yellow]")
 
 
 @app.command(name="list")

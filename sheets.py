@@ -98,6 +98,26 @@ def get_upcoming_deadlines(days: int = 2) -> list[dict]:
     return upcoming
 
 
+VALID_STATUSES = ["interest", "applied", "interview", "closed"]
+
+
+def update_status(url: str, status: str) -> bool:
+    """공고의 지원 상태를 업데이트."""
+    ws = _get_sheet()
+    headers = ws.row_values(1)
+
+    if "상태" not in headers:
+        return False
+    status_col = headers.index("상태") + 1
+
+    urls = ws.col_values(1)
+    for i, u in enumerate(urls):
+        if u == url:
+            ws.update_cell(i + 1, status_col, status)
+            return True
+    return False
+
+
 def mark_notified(url: str) -> None:
     """알림 발송 완료 표시."""
     ws = _get_sheet()

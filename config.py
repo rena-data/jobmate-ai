@@ -15,6 +15,7 @@ GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv(
 )
 
 CACHE_FILE = BASE_DIR / "cache.json"
+LOG_FILE = BASE_DIR / "jobmate.log"
 
 # Playwright
 PLAYWRIGHT_HEADLESS = False  # 초기엔 headless=False 권장 (봇 감지 대응)

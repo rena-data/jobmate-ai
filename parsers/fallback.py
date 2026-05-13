@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 from google import genai
+from google.genai import errors as genai_errors
 import trafilatura
 from playwright.async_api import async_playwright
+from rich.console import Console
 
 import config
 from parsers.base import BaseParser, JobPost, canonicalize_url, parse_deadline
+
+console = Console()
 
 
 class FallbackParser(BaseParser):
@@ -82,11 +87,27 @@ class FallbackParser(BaseParser):
 채용 공고 본문:
 {text}"""
 
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt,
-        )
-        return self._parse_json_response(response.text)
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                response = client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    contents=prompt,
+                )
+                return self._parse_json_response(response.text)
+            except genai_errors.ClientError as e:
+                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                    if attempt < max_retries:
+                        wait = 30 * (attempt + 1)
+                        console.print(f"[yellow]Gemini API 한도 초과. {wait}초 후 재시도... ({attempt + 1}/{max_retries})[/yellow]")
+                        time.sleep(wait)
+                    else:
+                        raise RuntimeError(
+                            "Gemini API 일일 무료 한도를 초과했습니다. "
+                            "잠시 후 다시 시도하거나, Google AI Studio에서 새 API 키를 발급해주세요."
+                        )
+                else:
+                    raise
 
     def _parse_json_response(self, text: str) -> dict:
         """Gemini 응답에서 JSON 추출."""

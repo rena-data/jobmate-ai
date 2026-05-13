@@ -2,8 +2,10 @@
 credentials.json
 gemini-cli-*.json
 cache.json
+jobmate.log
 __pycache__/
 *.pyc
 .venv/
 docs/
+.claude/
 /tmp/jobmate_cron.log
