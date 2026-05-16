@@ -20,11 +20,14 @@
 
 ## 지원 사이트
 
-| 사이트 | 방식 | 상태 |
-|--------|------|------|
-| 원티드 (wanted.co.kr) | 전용 파서 | 지원 |
-| 사람인 (saramin.co.kr) | 전용 파서 | 지원 |
-| 잡코리아, 로켓펀치, 기타 | AI 자동 추출 (Gemini) | 지원 (정확도 변동 가능) |
+| 사이트 | 방식 | 정확도 |
+|--------|------|--------|
+| 원티드 (wanted.co.kr) | 전용 파서 | 7/7 |
+| 사람인 (saramin.co.kr) | 전용 파서 | 5~7/7 |
+| 점핏 (jumpit.saramin.co.kr) | AI 자동 추출 (Gemini) | 양호 |
+| 잡코리아 (jobkorea.co.kr) | AI 자동 추출 (Gemini) | 양호 |
+| 로켓펀치 (rocketpunch.com) | - | 미지원 (봇 차단) |
+| 기타 사이트 | AI 자동 추출 (Gemini) | 사이트별 상이 |
 
 ---
 
@@ -288,7 +291,7 @@ crontab -e
 
 ### Q. 원티드 말고 다른 사이트도 되나요?
 
-원티드와 사람인은 전용 파서가 있어서 정확하게 추출합니다. 잡코리아, 로켓펀치 등 다른 사이트는 AI(Gemini)가 자동으로 분석하는데, 사이트에 따라 정확도가 달라질 수 있습니다.
+원티드와 사람인은 전용 파서가 있어서 정확하게 추출합니다. 점핏, 잡코리아 등 다른 사이트는 AI(Gemini)가 자동으로 분석합니다. 로켓펀치는 봇 차단 정책으로 인해 지원하지 않습니다.
 
 ### Q. Google Sheets에 데이터가 안 들어가요
 
@@ -318,11 +321,13 @@ jobmate-ai/
 ├── .env                 # API 키 등 비밀 정보 (GitHub 제외)
 ├── credentials.json     # Google 인증 파일 (GitHub 제외)
 ├── requirements.txt     # 필요한 라이브러리 목록
-└── parsers/             # 사이트별 크롤링 모듈
-    ├── base.py          # 공통 인터페이스 + 유틸리티
-    ├── wanted.py        # 원티드 전용
-    ├── saramin.py       # 사람인 전용
-    └── fallback.py      # 기타 사이트 (Gemini AI 자동 추출)
+├── parsers/             # 사이트별 크롤링 모듈
+│   ├── base.py          # 공통 인터페이스 + 유틸리티
+│   ├── wanted.py        # 원티드 전용
+│   ├── saramin.py       # 사람인 전용
+│   └── fallback.py      # 기타 사이트 (Gemini AI 자동 추출)
+├── test_fallback.py     # 폴백 파서 테스트
+└── test_parsers.py      # 전용 파서 테스트
 ```
 
 ## Google Sheets에 저장되는 항목
@@ -345,7 +350,8 @@ jobmate-ai/
 
 # 고도화 로드맵
 
-- 잡코리아, 직행, 로켓펀치 등 Gemini AI 폴백 테스트 및 전용 파서 추가
+- Gemini 폴백 정확도 검증 (잡코리아/점핏) → 전용 파서 필요 여부 결정
+- 사람인 대기업 공채 엣지케이스 보강
 - 기업 리뷰 자동 수집
 - JD 기반 자소서 첨삭 AI
 - 로컬 웹 대시보드
