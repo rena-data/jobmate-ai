@@ -21,7 +21,7 @@ class SaraminParser(BaseParser):
         return self._extract(main_html, detail_html, canonical)
 
     async def _fetch_page(self, url: str) -> tuple[str, str]:
-        """메인 페이지 + iframe 상세 페이지를 모두 가져옴."""
+        """메인 페이지 + 상세 내용을 가져옴."""
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=config.PLAYWRIGHT_HEADLESS)
             try:
@@ -39,7 +39,7 @@ class SaraminParser(BaseParser):
 
                 main_html = await page.content()
 
-                # 사람인은 상세 내용이 iframe 안에 있음
+                # iframe 방식 (레거시) 시도
                 detail_html = ""
                 for frame in page.frames:
                     if "view-detail" in frame.url:
@@ -81,16 +81,26 @@ class SaraminParser(BaseParser):
         post.deadline_raw = deadline_raw
         post.deadline_parsed, post.deadline_type = parse_deadline(deadline_raw)
 
-        # 상세 내용 (iframe)
+        # 상세 내용: iframe 우선, 없으면 메인 페이지에서 추출
+        detail_text = ""
         if detail_soup:
             detail_text = detail_soup.get_text("\n", strip=True)
+        if len(detail_text) < 100:
+            # iframe 없거나 내용 부족 → 메인 페이지에서 직접 추출
+            detail_text = self._extract_detail_from_main(main_soup)
+
+        if detail_text:
             sections = self._extract_sections_from_text(detail_text)
             post.responsibilities = sections.get("responsibilities", "")
             post.requirements = sections.get("requirements", "")
             post.preferred = sections.get("preferred", "")
 
-            # 업종 (iframe 상세에서)
-            post.company_type = self._extract_industry(detail_soup, detail_text)
+            # 업종
+            post.company_type = self._extract_industry_from_text(detail_text)
+            if not post.company_type:
+                post.company_type = self._extract_industry(
+                    detail_soup or main_soup, detail_text
+                )
 
             # 직원수
             emp_match = re.search(r"(\d{1,5})\s*명", detail_text)
@@ -98,6 +108,33 @@ class SaraminParser(BaseParser):
                 post.employee_count = emp_match.group(0).strip()
 
         return post
+
+    def _extract_detail_from_main(self, soup: BeautifulSoup) -> str:
+        """메인 페이지에서 상세 콘텐츠 영역 추출 (iframe 폐지 대응)."""
+        # 우선순위 순으로 상세 영역 선택자 시도
+        selectors = [
+            ".wrap_jv_cont",
+            "[class*='DetailContent']",
+            "[class*='jobDetailContent']",
+            ".cont_detail",
+            "#content",
+        ]
+        for sel in selectors:
+            el = soup.select_one(sel)
+            if el and len(el.get_text(strip=True)) > 100:
+                return el.get_text("\n", strip=True)
+        return ""
+
+    def _extract_industry_from_text(self, text: str) -> str:
+        """텍스트에서 업종 추출."""
+        m = re.search(r"업종[\s\t:：]+(.+?)(?:\n|직종|선택|기업형태|$)", text)
+        if m:
+            industry = m.group(1).strip()
+            if ">" in industry:
+                parts = [p.strip() for p in industry.split(">")]
+                return parts[-1] if parts else industry
+            return industry[:50]
+        return ""
 
     def _extract_text(self, soup: BeautifulSoup, selectors: list[str]) -> str:
         for sel in selectors:
@@ -148,14 +185,15 @@ class SaraminParser(BaseParser):
 
         patterns = {
             "responsibilities": [
-                r"(?:이런\s*일|주요\s*업무|담당\s*업무|업무\s*내용|하는\s*일)[을를\s]*합니다[.\s]*([\s\S]*?)(?=자격|우대|필수|이런\s*분|경력|학력|근무|혜택|복지|접수|지원|$)",
-                r"(?:주요\s*업무|담당\s*업무|업무\s*내용|What you)[\s:：]*([\s\S]*?)(?=자격|우대|필수|이런\s*분|경력|학력|근무|혜택|복지|접수|지원|$)",
+                r"(?:이런\s*일|주요\s*업무|담당\s*업무|업무\s*내용|하는\s*일)[을를\s]*(?:합니다|해요)?[.\s:：]*([\s\S]*?)(?=자격|우대|필수|이런\s*분|경력|학력|근무|혜택|복지|접수|지원|기업\s*정보|$)",
+                r"(?:주요\s*업무|담당\s*업무|업무\s*내용|직무\s*내용|What you)[\s:：]*([\s\S]*?)(?=자격|우대|필수|이런\s*분|경력|학력|근무|혜택|복지|접수|지원|기업\s*정보|$)",
+                r"(?:모집\s*분야\s*및\s*업무)[\s:：]*([\s\S]*?)(?=자격|우대|필수|이런\s*분|경력|학력|근무|혜택|복지|접수|지원|기업\s*정보|$)",
             ],
             "requirements": [
-                r"(?:자격\s*요건|필수\s*조건|지원\s*자격|이런\s*분을?\s*찾|필요\s*역량|Requirements)[\s:：]*([\s\S]*?)(?=우대|혜택|복지|근무|접수|지원|Preferred|$)",
+                r"(?:자격\s*요건|필수\s*조건|지원\s*자격|이런\s*분을?\s*찾|필요\s*역량|Requirements)[\s:：]*(?:상세\s*보기\s*)?([\s\S]*?)(?=우대|혜택|복지|근무|접수|지원|Preferred|기업\s*정보|닫기\s*-|$)",
             ],
             "preferred": [
-                r"(?:우대\s*사항|우대\s*조건|이런\s*분이면?\s*더|Preferred)[\s:：]*([\s\S]*?)(?=혜택|복지|근무|접수|지원|전형|채용|Benefits|$)",
+                r"(?:우대\s*사항|우대\s*조건|이런\s*분이면?\s*더|Preferred)[\s:：]*(?:상세\s*보기\s*)?([\s\S]*?)(?=혜택|복지|근무|접수|지원|전형|채용|Benefits|기업\s*정보|닫기\s*-|급여|$)",
             ],
         }
 
@@ -164,6 +202,9 @@ class SaraminParser(BaseParser):
                 m = re.search(pat, text, re.IGNORECASE)
                 if m:
                     content = m.group(1).strip()[:2000]
+                    # UI 텍스트 제거
+                    content = re.sub(r"닫기\s*-\s*\S+\s*상세", "", content).strip()
+                    content = re.sub(r"상세\s*보기", "", content).strip()
                     if len(content) > 10:
                         sections[key] = content
                         break

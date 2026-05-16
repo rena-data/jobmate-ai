@@ -50,17 +50,45 @@ class FallbackParser(BaseParser):
                 await browser.close()
 
     def _extract_main_content(self, html: str) -> str:
-        """trafilatura로 본문만 추출 (광고/네비게이션 제거)."""
-        text = trafilatura.extract(html, include_comments=False, include_tables=True)
-        if text and len(text) > 100:
-            return text[:8000]  # Gemini 입력 제한 고려
-
-        # trafilatura 실패 시 간단한 태그 제거
+        """trafilatura + BeautifulSoup 병행으로 본문 추출."""
         from bs4 import BeautifulSoup
+
+        # HTTP 에러 페이지 감지
+        if len(html) < 2000:
+            lower = html.lower()
+            if any(kw in lower for kw in ["403", "404", "forbidden", "not found", "request blocked", "access denied"]):
+                raise RuntimeError("페이지 접근이 차단되었습니다 (403/봇 감지). 해당 사이트는 자동 수집을 지원하지 않습니다.")
+
+        # 1) trafilatura 시도
+        traf_text = trafilatura.extract(html, include_comments=False, include_tables=True) or ""
+
+        # 2) BeautifulSoup 타겟 추출 (채용 공고 본문 영역)
         soup = BeautifulSoup(html, "html.parser")
-        for tag in soup.find_all(["script", "style", "nav", "footer", "header", "aside"]):
+        for tag in soup.find_all(["script", "style", "nav", "footer", "header", "aside", "iframe"]):
             tag.decompose()
-        text = soup.get_text("\n", strip=True)
+
+        # 채용 상세 영역 우선 탐색
+        content_selectors = [
+            "[class*='job-detail']", "[class*='jobDetail']", "[class*='JobDetail']",
+            "[class*='recruit']", "[class*='Recruit']",
+            "[class*='posting']", "[class*='Posting']",
+            "[class*='description']", "[class*='Description']",
+            "article", "main", "[role='main']",
+        ]
+        bs4_text = ""
+        for sel in content_selectors:
+            el = soup.select_one(sel)
+            if el:
+                candidate = el.get_text("\n", strip=True)
+                if len(candidate) > len(bs4_text):
+                    bs4_text = candidate
+
+        # 타겟 선택자 실패 시 전체 본문
+        if len(bs4_text) < 200:
+            bs4_text = soup.get_text("\n", strip=True)
+
+        # 더 긴 결과 채택
+        text = traf_text if len(traf_text) >= len(bs4_text) else bs4_text
         return text[:8000]
 
     def _extract_with_gemini(self, text: str) -> dict:

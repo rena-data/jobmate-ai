@@ -208,6 +208,61 @@ class WantedParser(BaseParser):
 
         text = soup.get_text()
 
+        # 업종 추출 - 원티드 태그/카테고리 영역
+        # 원티드는 회사 정보 영역에 "IT, 컨텐츠" 같은 업종 태그를 표시
+        industry_patterns = [
+            r"산업\s*[:：]?\s*(.+?)(?:\n|$)",
+            r"업종\s*[:：]?\s*(.+?)(?:\n|$)",
+        ]
+        for pat in industry_patterns:
+            m = re.search(pat, text)
+            if m:
+                candidate = m.group(1).strip()
+                if 0 < len(candidate) < 50:
+                    info["industry"] = candidate
+                    break
+
+        # 태그 영역에서 업종 추출 시도
+        if not info["industry"]:
+            tag_selectors = [
+                "[class*='Tag']", "[class*='tag']",
+                "[class*='category']", "[class*='Category']",
+                "[class*='industry']", "[class*='Industry']",
+            ]
+            for sel in tag_selectors:
+                tags = soup.select(sel)
+                for tag in tags:
+                    tag_text = tag.get_text(strip=True)
+                    # 짧은 태그 중 업종 키워드 포함
+                    if 2 < len(tag_text) < 30 and any(kw in tag_text for kw in [
+                        "IT", "금융", "커머스", "교육", "헬스", "미디어", "게임",
+                        "핀테크", "SaaS", "플랫폼", "콘텐츠", "광고", "엔터",
+                        "물류", "제조", "유통", "바이오", "소프트웨어",
+                    ]):
+                        info["industry"] = tag_text
+                        break
+                if info["industry"]:
+                    break
+
+        # 회사 링크 근처의 메타 정보에서 업종 추출 (예: "회사명∙IT, 컨텐츠∙서울")
+        if not info["industry"]:
+            for a in soup.find_all("a", href=True):
+                if "/company/" in a["href"]:
+                    parent = a.parent
+                    if parent:
+                        meta_text = parent.get_text("∙", strip=True)
+                        parts = [p.strip() for p in meta_text.split("∙")]
+                        for part in parts:
+                            if 2 < len(part) < 30 and part != info.get("_company", ""):
+                                # 회사명/위치가 아닌 중간 파트가 업종일 가능성
+                                if any(kw in part for kw in [
+                                    "IT", "금융", "서비스", "테크", "소프트", "미디어",
+                                    "커머스", "플랫폼", "콘텐츠", "게임", "엔터",
+                                ]):
+                                    info["industry"] = part
+                                    break
+                    break
+
         # 직원수 패턴 - "300명" 같은 패턴 찾되 전화번호 등 제외
         emp_patterns = [
             r"(\d{1,5})\s*명",
@@ -230,8 +285,6 @@ class WantedParser(BaseParser):
                 if parent:
                     section_text = parent.get_text("\n", strip=True)
                     lines = [l.strip() for l in section_text.split("\n") if l.strip()]
-                    # 첫번째 줄은 보통 "회사명∙위치∙경력"
-                    # 그 이후 긴 줄이 회사 설명
                     for line in lines[1:]:
                         if len(line) > 30 and "주요업무" not in line:
                             info["description"] = line[:300]
