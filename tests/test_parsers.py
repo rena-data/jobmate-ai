@@ -11,6 +11,11 @@ from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 
+# 앱 소스(src/)를 import 경로에 추가 — tests/에서 실행해도 parsers를 찾도록
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
 from parsers.wanted import WantedParser
 from parsers.saramin import SaraminParser
 from parsers.base import canonicalize_url

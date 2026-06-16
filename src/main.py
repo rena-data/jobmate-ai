@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-import time
-from datetime import datetime
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
-from rich.status import Status
 from rich.table import Table
 
 import config
@@ -22,25 +17,15 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("jobmate")
-from parsers.base import canonicalize_url, check_robots_txt, JobPost
-from parsers.wanted import WantedParser
-from parsers.saramin import SaraminParser
-from parsers.fallback import FallbackParser
-import sheets
-import slack
+
+from parsers.base import canonicalize_url, JobPost
+import service
 
 app = typer.Typer(
     help="JobMate AI - 채용 공고 자동 수집/관리 CLI",
     invoke_without_command=True,
 )
 console = Console()
-
-# 파서 등록 (우선순위 순)
-PARSERS = [
-    WantedParser(),
-    SaraminParser(),
-    FallbackParser(),  # 항상 마지막 (폴백)
-]
 
 
 @app.callback()
@@ -109,112 +94,62 @@ def _interactive_mode():
 
 def _add_url(url: str):
     """인터랙티브 모드에서 URL 추가 실행."""
-    canonical = canonicalize_url(url)
-
-    if _is_cached(canonical):
-        console.print(f"[yellow]이미 등록된 URL입니다: {canonical}[/yellow]")
-        return
-
-    if config.CHECK_ROBOTS_TXT:
-        allowed, status_msg = check_robots_txt(canonical)
-        console.print(f"[dim]robots.txt: {status_msg}[/dim]")
-        if not allowed:
-            console.print(f"[yellow]robots.txt에서 접근이 제한된 URL입니다.[/yellow]")
-            return
-
-    if config.REQUEST_DELAY_SECONDS > 0:
-        console.print(f"[dim]요청 딜레이 {config.REQUEST_DELAY_SECONDS}초...[/dim]")
-        time.sleep(config.REQUEST_DELAY_SECONDS)
-
-    parser = None
-    for p in PARSERS:
-        if p.can_handle(canonical):
-            parser = p
-            parser_name = type(p).__name__
-            break
-
-    if parser is None:
-        console.print("[red]지원하지 않는 URL입니다.[/red]")
-        return
-
     logger.info(f"add 시작 (interactive): {url}")
 
     try:
-        with console.status(f"[cyan]수집 중... (파서: {parser_name})[/cyan]", spinner="dots"):
-            post = asyncio.run(parser.parse(canonical))
+        with console.status("[cyan]수집 중...[/cyan]", spinner="dots"):
+            result = service.collect(url)
     except KeyboardInterrupt:
         console.print("\n[dim]취소되었습니다.[/dim]")
         return
-    except TimeoutError:
-        console.print("[red]페이지 로딩 시간 초과.[/red]")
+
+    if result.already_cached:
+        console.print(f"[yellow]이미 등록된 URL입니다: {result.canonical_url}[/yellow]")
         return
-    except Exception as e:
-        error_msg = str(e)
-        if "net::ERR" in error_msg or "Timeout" in error_msg:
-            console.print("[red]네트워크 오류. 인터넷 연결을 확인해주세요.[/red]")
-        else:
-            console.print(f"[red]크롤링 실패: {error_msg}[/red]")
+    if not result.robots_ok:
+        console.print(f"[dim]robots.txt: {result.robots_msg}[/dim]")
+        console.print("[yellow]robots.txt에서 접근이 제한된 URL입니다.[/yellow]")
+        return
+    if result.post is None:
+        console.print(f"[red]{result.error}[/red]")
+        return
 
-        if parser_name != "FallbackParser":
-            console.print("[yellow]Gemini 폴백으로 재시도합니다...[/yellow]")
-            try:
-                with console.status("[cyan]폴백 수집 중...[/cyan]", spinner="dots"):
-                    post = asyncio.run(FallbackParser().parse(canonical))
-            except Exception as e2:
-                console.print(f"[red]폴백도 실패: {e2}[/red]")
-                return
-        else:
-            return
-
-    _display_preview(post)
+    _emit_collect_notes(result)
+    _display_preview(result.post)
 
     confirm = typer.confirm("Google Sheets에 저장하시겠습니까?")
     if not confirm:
         console.print("[dim]저장을 취소했습니다.[/dim]")
         return
 
+    _save_and_report(result.post)
+
+
+def _emit_collect_notes(result: service.CollectResult) -> None:
+    """수집 부가 정보(robots 상태, 폴백 경고)를 콘솔에 출력."""
+    if result.robots_msg:
+        console.print(f"[dim]robots.txt: {result.robots_msg}[/dim]")
+    for warning in result.warnings:
+        console.print(f"[yellow]{warning}[/yellow]")
+
+
+def _save_and_report(post: JobPost) -> bool:
+    """Google Sheets에 저장하고 결과 메시지 출력. 성공 여부 반환."""
     try:
-        sheets.save_job_post(post)
-        _add_to_cache(post)
-        logger.info(f"저장 완료 (interactive): {post.company} - {post.position}")
+        service.save(post)
+        logger.info(f"저장 완료: {post.company} - {post.position}")
         console.print("[green]Google Sheets에 저장 완료![/green]")
+        return True
     except PermissionError:
-        console.print("[red]Google Sheets 권한 오류.[/red]")
+        console.print("[red]Google Sheets 권한 오류. 서비스 계정 이메일에 편집자 권한을 부여했는지 확인해주세요.[/red]")
+        return False
     except Exception as e:
         error_msg = str(e)
         if "quota" in error_msg.lower():
-            console.print("[red]Google Sheets API 한도 초과.[/red]")
+            console.print("[red]Google Sheets API 한도 초과. 잠시 후 다시 시도해주세요.[/red]")
         else:
             console.print(f"[red]저장 실패: {error_msg}[/red]")
-
-
-def _load_cache() -> list[dict]:
-    try:
-        with open(config.CACHE_FILE, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
-
-
-def _save_cache(cache: list[dict]) -> None:
-    with open(config.CACHE_FILE, "w") as f:
-        json.dump(cache, f, ensure_ascii=False, indent=2)
-
-
-def _is_cached(url: str) -> bool:
-    cache = _load_cache()
-    return any(item["url"] == url for item in cache)
-
-
-def _add_to_cache(post: JobPost) -> None:
-    cache = _load_cache()
-    cache.append({
-        "url": post.url,
-        "company": post.company,
-        "position": post.position,
-        "last_seen": post.created_at,
-    })
-    _save_cache(cache)
+        return False
 
 
 def _display_preview(post: JobPost) -> None:
@@ -252,68 +187,29 @@ def add(
 ):
     """채용 공고 URL을 분석하여 Google Sheets에 저장합니다."""
     logger.info(f"add 시작: {url}")
-    canonical = canonicalize_url(url)
-
-    # 중복 체크
-    if _is_cached(canonical):
-        console.print(f"[yellow]이미 등록된 URL입니다: {canonical}[/yellow]")
-        raise typer.Exit()
-
-    # robots.txt 확인
-    if config.CHECK_ROBOTS_TXT:
-        allowed, status = check_robots_txt(canonical)
-        console.print(f"[dim]robots.txt: {status}[/dim]")
-        if not allowed:
-            console.print(f"[yellow]robots.txt에서 접근이 제한된 URL입니다: {canonical}[/yellow]")
-            raise typer.Exit()
-
-    # 요청 딜레이 (연속 요청 방지)
-    if config.REQUEST_DELAY_SECONDS > 0:
-        console.print(f"[dim]요청 딜레이 {config.REQUEST_DELAY_SECONDS}초...[/dim]")
-        time.sleep(config.REQUEST_DELAY_SECONDS)
-
-    # 적절한 파서 선택
-    parser = None
-    for p in PARSERS:
-        if p.can_handle(canonical):
-            parser = p
-            parser_name = type(p).__name__
-            break
-
-    if parser is None:
-        console.print("[red]지원하지 않는 URL입니다.[/red]")
-        raise typer.Exit(1)
-
-    console.print(f"[cyan]수집 중... (파서: {parser_name})[/cyan]")
 
     try:
-        post = asyncio.run(parser.parse(canonical))
+        with console.status("[cyan]수집 중...[/cyan]", spinner="dots"):
+            result = service.collect(url)
     except KeyboardInterrupt:
         console.print("\n[dim]취소되었습니다.[/dim]")
         raise typer.Exit()
-    except TimeoutError:
-        console.print("[red]페이지 로딩 시간 초과. 네트워크 연결을 확인하거나 잠시 후 다시 시도해주세요.[/red]")
-        raise typer.Exit(1)
-    except Exception as e:
-        error_msg = str(e)
-        if "net::ERR" in error_msg or "Timeout" in error_msg:
-            console.print("[red]네트워크 오류. 인터넷 연결을 확인해주세요.[/red]")
-        else:
-            console.print(f"[red]크롤링 실패: {error_msg}[/red]")
 
-        # 전용 파서 실패 시 폴백 시도
-        if parser_name != "FallbackParser":
-            console.print("[yellow]Gemini 폴백으로 재시도합니다...[/yellow]")
-            try:
-                post = asyncio.run(FallbackParser().parse(canonical))
-            except Exception as e2:
-                console.print(f"[red]폴백도 실패: {e2}[/red]")
-                raise typer.Exit(1)
-        else:
-            raise typer.Exit(1)
+    if result.already_cached:
+        console.print(f"[yellow]이미 등록된 URL입니다: {result.canonical_url}[/yellow]")
+        raise typer.Exit()
+    if not result.robots_ok:
+        console.print(f"[dim]robots.txt: {result.robots_msg}[/dim]")
+        console.print(f"[yellow]robots.txt에서 접근이 제한된 URL입니다: {result.canonical_url}[/yellow]")
+        raise typer.Exit()
+    if result.post is None:
+        console.print(f"[red]{result.error}[/red]")
+        raise typer.Exit(1)
+
+    _emit_collect_notes(result)
 
     # 미리보기
-    _display_preview(post)
+    _display_preview(result.post)
 
     # 저장 확인
     if not skip_confirm:
@@ -323,19 +219,7 @@ def add(
             raise typer.Exit()
 
     # 저장
-    try:
-        sheets.save_job_post(post)
-        _add_to_cache(post)
-        logger.info(f"저장 완료: {post.company} - {post.position}")
-        console.print("[green]Google Sheets에 저장 완료![/green]")
-    except PermissionError:
-        console.print("[red]Google Sheets 권한 오류. 서비스 계정 이메일에 편집자 권한을 부여했는지 확인해주세요.[/red]")
-    except Exception as e:
-        error_msg = str(e)
-        if "quota" in error_msg.lower():
-            console.print("[red]Google Sheets API 한도 초과. 잠시 후 다시 시도해주세요.[/red]")
-        else:
-            console.print(f"[red]저장 실패: {error_msg}[/red]")
+    if not _save_and_report(result.post):
         raise typer.Exit(1)
 
 
@@ -348,7 +232,7 @@ def notify(
     console.print("[cyan]마감 임박 공고 확인 중...[/cyan]")
 
     try:
-        upcoming = sheets.get_upcoming_deadlines(days=config.NOTIFY_DAYS_BEFORE)
+        upcoming = service.find_upcoming(config.NOTIFY_DAYS_BEFORE)
     except Exception as e:
         console.print(f"[red]시트 조회 실패: {e}[/red]")
         raise typer.Exit(1)
@@ -376,13 +260,9 @@ def notify(
         if not confirm:
             raise typer.Exit()
 
-    success = slack.send_deadline_alert(upcoming)
+    success = service.send_notifications(upcoming)
     if success:
-        for job in upcoming:
-            try:
-                sheets.mark_notified(job["url"])
-            except Exception:
-                pass
+        service.mark_all_notified(upcoming)
         logger.info(f"Slack 알림 발송 완료: {len(upcoming)}건")
         console.print("[green]Slack 알림 발송 완료![/green]")
     else:
@@ -396,14 +276,14 @@ def status(
     new_status: str = typer.Argument(..., help="변경할 상태 (interest / applied / interview / closed)"),
 ):
     """공고의 지원 상태를 변경합니다."""
-    if new_status not in sheets.VALID_STATUSES:
+    if new_status not in service.VALID_STATUSES:
         console.print(f"[red]유효하지 않은 상태: {new_status}[/red]")
-        console.print(f"[dim]사용 가능: {', '.join(sheets.VALID_STATUSES)}[/dim]")
+        console.print(f"[dim]사용 가능: {', '.join(service.VALID_STATUSES)}[/dim]")
         raise typer.Exit(1)
 
     canonical = canonicalize_url(url)
     try:
-        updated = sheets.update_status(canonical, new_status)
+        updated = service.change_status(canonical, new_status)
     except Exception as e:
         console.print(f"[red]상태 변경 실패: {e}[/red]")
         raise typer.Exit(1)
@@ -422,7 +302,7 @@ def list_posts(
     if online:
         try:
             with console.status("[cyan]Sheets에서 조회 중...[/cyan]", spinner="dots"):
-                records = sheets.get_all_posts()
+                records = service.list_jobs(online=True)
         except Exception as e:
             console.print(f"[red]시트 조회 실패: {e}[/red]")
             raise typer.Exit(1)
@@ -461,7 +341,7 @@ def list_posts(
 
         console.print(table)
     else:
-        cache = _load_cache()
+        cache = service.list_jobs(online=False)
         if not cache:
             console.print("[dim]저장된 공고가 없습니다. (--online으로 Sheets에서 조회 가능)[/dim]")
             raise typer.Exit()

@@ -11,7 +11,7 @@
 ## 어떻게 동작하나요?
 
 ```
-1. 터미널에서 채용 공고 URL을 입력합니다
+1. 웹 화면 또는 터미널에서 채용 공고 URL을 입력합니다
 2. 자동으로 회사명, 포지션, 자격요건, 우대사항, 마감일을 추출합니다
 3. 결과를 보여주고, 저장할지 물어봅니다
 4. "y"를 누르면 Google Sheets에 자동 저장됩니다
@@ -24,10 +24,13 @@
 |--------|------|--------|
 | 원티드 (wanted.co.kr) | 전용 파서 | 7/7 |
 | 사람인 (saramin.co.kr) | 전용 파서 | 5~7/7 |
+| 잡코리아 (jobkorea.co.kr) | 전용 파서 (Gemini 불필요) | 양호 |
+| 그룹바이 (groupby.kr) | 전용 파서 (Gemini 불필요) | 양호 |
 | 점핏 (jumpit.saramin.co.kr) | AI 자동 추출 (Gemini) | 양호 |
-| 잡코리아 (jobkorea.co.kr) | AI 자동 추출 (Gemini) | 양호 |
 | 로켓펀치 (rocketpunch.com) | - | 미지원 (봇 차단) |
 | 기타 사이트 | AI 자동 추출 (Gemini) | 사이트별 상이 |
+
+> **입력은 "개별 공고" URL만 지원합니다.** 목록/검색 페이지(예: 원티드 `/wdlist/...`, 사람인 `/jobs/list/...`, 그룹바이 `/positions`)가 아니라, 공고 하나를 클릭했을 때 나오는 주소(예: 원티드 `/wd/258066`, 그룹바이 `/positions/10760`)를 넣어주세요.
 
 ---
 
@@ -175,12 +178,34 @@ GOOGLE_SERVICE_ACCOUNT_FILE=credentials.json
 
 > 매번 사용 전에 가상환경을 활성화해야 합니다: `source .venv/bin/activate`
 
-## 인터랙티브 모드 (추천)
+## 웹 화면으로 사용하기 (추천)
 
-가장 간편한 사용법입니다. 프로그램을 실행하면 URL 입력창이 나타납니다.
+브라우저에서 클릭만으로 공고를 수집/관리할 수 있는 화면입니다.
 
 ```bash
-python main.py
+streamlit run src/app.py
+```
+
+실행하면 자동으로 브라우저에 화면이 열립니다 (안 열리면 터미널에 표시되는 `http://localhost:8501` 주소를 직접 열어주세요).
+
+| 탭 | 동작 |
+|------|------|
+| **수집** | URL을 붙여넣고 `수집` → 미리보기에서 내용 확인·수정 → `저장` |
+| **목록** | 저장된 공고 보기 (로컬 캐시 / Google Sheets 전환) |
+| **마감 알림** | 마감 임박 공고 조회 → `Slack으로 발송` |
+| **상태 변경** | 공고 선택 → 상태(관심/지원완료/면접/마감) 변경 |
+
+왼쪽 사이드바에서 API 키·인증 파일 설정 상태를 한눈에 확인할 수 있습니다.
+
+> 수집할 때 크롤링용 브라우저 창이 잠깐 떴다 닫힙니다 (봇 차단 회피를 위한 정상 동작입니다).
+> 종료하려면 터미널에서 `Ctrl + C`를 누릅니다.
+
+## 인터랙티브 모드 (터미널)
+
+터미널에서 바로 쓰는 방식입니다. 프로그램을 실행하면 URL 입력창이 나타납니다.
+
+```bash
+python src/main.py
 ```
 
 실행하면 이렇게 보입니다:
@@ -236,25 +261,25 @@ Google Sheets에 저장 완료!
 
 ```bash
 # 공고 추가
-python main.py add "https://www.wanted.co.kr/wd/258066"
+python src/main.py add "https://www.wanted.co.kr/wd/258066"
 
 # 확인 없이 바로 저장
-python main.py add "https://www.wanted.co.kr/wd/258066" --yes
+python src/main.py add "https://www.wanted.co.kr/wd/258066" --yes
 
 # 저장된 공고 목록 (로컬 캐시)
-python main.py list
+python src/main.py list
 
 # 저장된 공고 목록 (Sheets에서 최신 조회, 상태 포함)
-python main.py list --online
+python src/main.py list --online
 
 # 공고 상태 변경
-python main.py status "공고URL" applied
+python src/main.py status "공고URL" applied
 
 # 마감 임박 알림 (수동)
-python main.py notify
+python src/main.py notify
 
 # 마감 임박 알림 (자동, cron용)
-python main.py notify --auto
+python src/main.py notify --auto
 ```
 
 ### 상태 종류
@@ -275,7 +300,7 @@ python main.py notify --auto
 crontab -e
 
 # 아래 줄 추가 (매일 아침 8시에 실행)
-0 8 * * * /프로젝트경로/jobmate-ai/cron_notify.sh
+0 8 * * * /프로젝트경로/jobmate-ai/scripts/cron_notify.sh
 ```
 
 > `/프로젝트경로/`는 실제 프로젝트가 있는 경로로 바꿔주세요.
@@ -291,7 +316,16 @@ crontab -e
 
 ### Q. 원티드 말고 다른 사이트도 되나요?
 
-원티드와 사람인은 전용 파서가 있어서 정확하게 추출합니다. 점핏, 잡코리아 등 다른 사이트는 AI(Gemini)가 자동으로 분석합니다. 로켓펀치는 봇 차단 정책으로 인해 지원하지 않습니다.
+원티드·사람인·잡코리아·그룹바이는 전용 파서가 있어서 정확하게 추출합니다(Gemini 불필요 → 일일 한도와 무관). 점핏 등 그 외 사이트는 AI(Gemini)가 자동으로 분석합니다. 로켓펀치는 봇 차단 정책으로 인해 지원하지 않습니다.
+
+### Q. 수집할 때 `Executable doesn't exist` / `playwright install` 에러가 떠요
+
+크롤링용 브라우저가 아직 설치되지 않은 경우입니다. 가상환경을 활성화한 뒤 아래 명령을 한 번 실행하면 해결됩니다 (가상환경을 새로 만들면 다시 실행해야 합니다).
+
+```bash
+source .venv/bin/activate
+playwright install chromium
+```
 
 ### Q. Google Sheets에 데이터가 안 들어가요
 
@@ -302,7 +336,7 @@ crontab -e
 ### Q. Slack 알림이 안 와요
 
 - `.env` 파일의 `SLACK_WEBHOOK_URL`이 정확한지 확인하세요
-- `python main.py notify`를 수동으로 실행해서 마감 임박 공고가 있는지 확인하세요
+- `python src/main.py notify`를 수동으로 실행해서 마감 임박 공고가 있는지 확인하세요
 - 상시채용(rolling) 공고는 마감일이 없으므로 알림 대상이 아닙니다
 
 ---
@@ -311,23 +345,33 @@ crontab -e
 
 ```
 jobmate-ai/
-├── main.py              # 메인 프로그램 (인터랙티브 모드 + add/list/notify/status)
-├── config.py            # 설정값
-├── sheets.py            # Google Sheets 연동
-├── slack.py             # Slack 알림
-├── cache.json           # 중복 방지용 캐시 (GitHub 제외)
-├── jobmate.log          # 실행 로그 (GitHub 제외)
-├── cron_notify.sh       # 자동 알림 스크립트
+├── README.md            # 이 문서
+├── requirements.txt     # 필요한 라이브러리 목록
 ├── .env                 # API 키 등 비밀 정보 (GitHub 제외)
 ├── credentials.json     # Google 인증 파일 (GitHub 제외)
-├── requirements.txt     # 필요한 라이브러리 목록
-├── parsers/             # 사이트별 크롤링 모듈
-│   ├── base.py          # 공통 인터페이스 + 유틸리티
-│   ├── wanted.py        # 원티드 전용
-│   ├── saramin.py       # 사람인 전용
-│   └── fallback.py      # 기타 사이트 (Gemini AI 자동 추출)
-├── test_fallback.py     # 폴백 파서 테스트
-└── test_parsers.py      # 전용 파서 테스트
+├── src/                 # 앱 소스
+│   ├── app.py           # 웹 화면 (Streamlit)
+│   ├── main.py          # 터미널 프로그램 (인터랙티브 + add/list/notify/status)
+│   ├── service.py       # 공통 로직 (웹·터미널이 함께 사용)
+│   ├── config.py        # 설정값 (경로·시크릿)
+│   ├── sheets.py        # Google Sheets 연동
+│   ├── slack.py         # Slack 알림
+│   └── parsers/         # 사이트별 크롤링 모듈
+│       ├── base.py      # 공통 인터페이스 + 유틸리티
+│       ├── wanted.py    # 원티드 전용
+│       ├── saramin.py   # 사람인 전용
+│       ├── jobkorea.py  # 잡코리아 전용 (ld+json + iframe)
+│       ├── groupby.py   # 그룹바이 전용 (__NEXT_DATA__ JSON)
+│       └── fallback.py  # 기타 사이트 (Gemini AI 자동 추출)
+├── tests/               # 테스트 스크립트
+│   ├── test_parsers.py  # 전용 파서 테스트
+│   └── test_fallback.py # 폴백 파서 테스트
+├── scripts/
+│   └── cron_notify.sh   # 자동 알림 스크립트 (cron)
+├── data/                # 런타임 (GitHub 제외)
+│   ├── cache.json       # 중복 방지용 캐시
+│   └── jobmate.log      # 실행 로그
+└── docs/                # 문서 (GitHub 제외)
 ```
 
 ## Google Sheets에 저장되는 항목
@@ -354,4 +398,4 @@ jobmate-ai/
 - 사람인 대기업 공채 엣지케이스 보강
 - 기업 리뷰 자동 수집
 - JD 기반 자소서 첨삭 AI
-- 로컬 웹 대시보드
+- ✅ 로컬 웹 대시보드 (Streamlit) — 완료
