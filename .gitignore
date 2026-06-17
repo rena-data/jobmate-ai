@@ -10,3 +10,15 @@ docs/
 .claude/
 /tmp/jobmate_cron.log
 /data/
+
+# 추가 시크릿 방어 (파일명이 달라도 차단)
+.env.*
+!.env.example
+*.pem
+*.key
+*.p8
+*.p12
+service_account*.json
+*_credentials.json
+*-credentials.json
+secrets/
