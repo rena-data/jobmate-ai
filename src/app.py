@@ -9,12 +9,48 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
+import pandas as pd
 import streamlit as st
 
 import config
 import service
 
 st.set_page_config(page_title="JobMate AI", page_icon="💼", layout="wide")
+
+# 사이드바: 텍스트 약간 확대 + 환경 상태를 최하단에 고정
+st.markdown(
+    """
+    <style>
+    /* 사이드바 본문 텍스트 약간 확대 */
+    section[data-testid="stSidebar"] p,
+    section[data-testid="stSidebar"] label { font-size: 1.05rem; }
+    /* 메뉴(카테고리) 강조 — 크게 + 굵게 (그룹 헤더 느낌) */
+    section[data-testid="stSidebar"] [data-testid="stPageLink"] * {
+        font-size: 1.15rem !important;
+        font-weight: 700 !important;
+    }
+    /* 1) 최상위 컨테이너: 풀하이트 flex 컬럼 */
+    section[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+        display: flex !important;
+        flex-direction: column !important;
+        min-height: calc(100vh - 1rem);
+    }
+    /* 2) 하위 컨테이너 체인을 모두 '부모를 꽉 채우는 flex 컬럼'으로
+          (UserContent → 그 child → 실제 콘텐츠 stVerticalBlock 까지) */
+    section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"],
+    section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] > div,
+    section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] > div > [data-testid="stVerticalBlock"] {
+        display: flex !important;
+        flex-direction: column !important;
+        flex: 1 1 auto !important;
+        min-height: 0 !important;
+    }
+    /* 3) 환경 상태(leaf)만 최하단으로 — 브랜드/메뉴는 상단 유지 */
+    .st-key-sidebar_health { margin-top: auto !important; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -29,6 +65,7 @@ DEFAULTS = {
     "jobs_cache": None,        # 목록 탭 캐시
     "jobs_cache_online": None, # 목록 탭 캐시 소스 (True=온라인)
     "status_records": None,    # 상태 변경 탭 공고 목록 캐시
+    "dash_rows": None,         # 대시보드 탭 데이터 캐시
 }
 for _k, _v in DEFAULTS.items():
     st.session_state.setdefault(_k, _v)
@@ -53,22 +90,18 @@ def _clear_preview_state() -> None:
 # ---------------------------------------------------------------------------
 # 사이드바: 환경 상태 (읽기 전용)
 # ---------------------------------------------------------------------------
-def _render_sidebar() -> None:
-    with st.sidebar:
-        st.header("환경 상태")
-        h = service.health()
-        labels = {
-            "gemini": "Gemini API Key",
-            "slack": "Slack Webhook",
-            "sheets_id": "Google Sheets ID",
-            "credentials_file": "credentials.json",
-        }
-        for key, label in labels.items():
-            if h.get(key):
-                st.success(f"{label} 설정됨")
-            else:
-                st.error(f"{label} 없음")
-        st.caption("값은 `.env` / `credentials.json`에서 직접 관리합니다.")
+def _render_health_content() -> None:
+    """환경 상태 — SaaS/Admin 풋터 스타일 (상태 점 표시)."""
+    h = service.health()
+    items = [
+        ("AI 분석 (Gemini)", bool(h.get("gemini"))),
+        ("데이터 (Google Sheets)", bool(h.get("sheets_id") and h.get("credentials_file"))),
+        ("알림 (Slack)", bool(h.get("slack"))),
+    ]
+    st.markdown("##### 환경 상태")
+    lines = [f"{'🟢' if ok else '🔴'} {label}" for label, ok in items]
+    st.markdown("  \n".join(lines))
+    st.caption("값은 `.env` / `credentials.json`에서 관리")
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +234,7 @@ def _handle_save() -> None:
 
     st.session_state.jobs_cache = None
     st.session_state.status_records = None
+    st.session_state.dash_rows = None
     st.session_state.last_saved = f"저장 완료: {post.company} · {post.position}"
     _clear_preview_state()
     st.rerun()
@@ -362,25 +396,103 @@ def _render_status_tab() -> None:
         if updated:
             st.session_state.jobs_cache = None
             st.session_state.status_records = None
+            st.session_state.dash_rows = None
             st.success(f"상태 변경 완료: {new_status}")
         else:
             st.warning("해당 공고를 찾을 수 없습니다.")
 
 
 # ---------------------------------------------------------------------------
-# 메인
+# 탭 0: 대시보드
 # ---------------------------------------------------------------------------
-_render_sidebar()
-st.title("JobMate AI · 채용 공고 수집/관리")
+def _render_dashboard_tab() -> None:
+    st.subheader("대시보드")
+    c1, c2 = st.columns([4, 1])
+    with c2:
+        st.write("")
+        if st.button("새로고침", key="dash_refresh"):
+            st.session_state.dash_rows = None
 
-tab_collect, tab_list, tab_notify, tab_status = st.tabs(
-    ["수집", "목록", "마감 알림", "상태 변경"]
-)
-with tab_collect:
-    _render_collect_tab()
-with tab_list:
-    _render_list_tab()
-with tab_notify:
-    _render_notify_tab()
-with tab_status:
-    _render_status_tab()
+    if st.session_state.dash_rows is None:
+        try:
+            with st.spinner("불러오는 중…"):
+                st.session_state.dash_rows = service.list_jobs(online=True)
+        except Exception as e:
+            st.error(f"시트 조회 실패: {e}")
+            st.session_state.dash_rows = []
+
+    rows = st.session_state.dash_rows or []
+    if not rows:
+        st.info("저장된 공고가 없습니다. '수집' 탭에서 공고를 추가해 보세요.")
+        return
+
+    s = service.dashboard_summary(rows)
+    labelmap = {"interest": "관심", "applied": "지원완료", "interview": "면접", "closed": "마감"}
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("총 저장 공고", f"{s['total']}건")
+    k2.metric("마감 임박 (D-7)", f"{len(s['upcoming'])}건")
+    k3.metric("상시채용", f"{s['rolling']}건")
+    k4.metric("이번 주 신규", f"{s['new_this_week']}건")
+
+    st.divider()
+    cA, cB = st.columns(2)
+    with cA:
+        st.markdown("##### 직군별 분포")
+        if s["role_counts"]:
+            df = pd.DataFrame(
+                {"직군": list(s["role_counts"].keys()), "건수": list(s["role_counts"].values())}
+            ).set_index("직군")
+            st.bar_chart(df, horizontal=True)
+        else:
+            st.caption("데이터 없음")
+    with cB:
+        st.markdown("##### 상태별 분포")
+        sc = {labelmap[k]: v for k, v in s["status_counts"].items()}
+        df2 = pd.DataFrame({"상태": list(sc.keys()), "건수": list(sc.values())}).set_index("상태")
+        st.bar_chart(df2, horizontal=True)
+
+    st.divider()
+    st.markdown("##### 마감 임박 (D-7)")
+    if s["upcoming"]:
+        view = [
+            {
+                "회사": u["company"],
+                "직무": u["position"],
+                "마감일": u["deadline"],
+                "D-day": "오늘!" if u["days_left"] == 0 else f"D-{u['days_left']}",
+                "상태": labelmap.get(u["status"], u["status"]),
+            }
+            for u in s["upcoming"]
+        ]
+        st.dataframe(view, width="stretch", hide_index=True)
+    else:
+        st.caption("마감 임박(D-7) 공고가 없습니다.")
+
+
+# ---------------------------------------------------------------------------
+# 메인 — 좌측 사이드바: 브랜드(상단) → 메뉴(일반 링크) → 환경 상태(최하단)
+# ---------------------------------------------------------------------------
+_pages = [
+    st.Page(_render_dashboard_tab, title="대시보드", icon="📊", url_path="dashboard", default=True),
+    st.Page(_render_collect_tab, title="수집", icon="➕", url_path="collect"),
+    st.Page(_render_list_tab, title="목록", icon="📋", url_path="list"),
+    st.Page(_render_notify_tab, title="마감 알림", icon="🔔", url_path="notify"),
+    st.Page(_render_status_tab, title="상태 변경", icon="✏️", url_path="status"),
+]
+_nav = st.navigation(_pages, position="hidden")  # 기본 메뉴 숨김 → 아래 page_link로 직접 배치
+
+with st.sidebar:
+    # 상단 고정: 브랜드 + 메뉴
+    st.markdown("## 💼 JobMate AI")
+    st.caption("채용 공고 수집·정리·마감 알림")
+    st.divider()
+    for _p in _pages:
+        st.page_link(_p)
+    # 하단 고정: 환경 상태 (CSS margin-top:auto로 사이드바 최하단)
+    with st.container(key="sidebar_health"):
+        st.divider()
+        _render_health_content()
+
+# 선택된 페이지를 메인 영역에 렌더
+_nav.run()

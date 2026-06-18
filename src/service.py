@@ -13,15 +13,15 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 
 import config
+from classify import classify_role
 from parsers.base import (
     JobPost,
     DeadlineType,
     canonicalize_url,
     check_robots_txt,
-    parse_deadline,
 )
 from parsers.wanted import WantedParser
 from parsers.saramin import SaraminParser
@@ -252,6 +252,67 @@ def find_upcoming(days: int | None = None) -> list[dict]:
     if days is None:
         days = config.NOTIFY_DAYS_BEFORE
     return sheets.get_upcoming_deadlines(days=days)
+
+
+def dashboard_summary(rows: list[dict], upcoming_days: int = 7) -> dict:
+    """저장된 공고 행(get_all_posts 형식)을 집계해 대시보드용 통계 반환.
+
+    순수 함수(네트워크 없음) — rows만 받아 계산하므로 단독 테스트 가능.
+    직군은 classify_role로 온더플라이 분류(시트 컬럼 불필요).
+    """
+    today = date.today()
+    status_counts = {"interest": 0, "applied": 0, "interview": 0, "closed": 0}
+    role_counts: dict[str, int] = {}
+    upcoming: list[dict] = []
+    rolling = 0
+    new_this_week = 0
+
+    for r in rows:
+        st = str(r.get("상태", "") or "interest")
+        if st in status_counts:
+            status_counts[st] += 1
+
+        role = classify_role(str(r.get("포지션", "")), str(r.get("주요업무", "")))
+        role_counts[role] = role_counts.get(role, 0) + 1
+
+        if str(r.get("마감유형", "")) == "rolling":
+            rolling += 1
+
+        deadline_str = str(r.get("마감일(파싱)", "") or "")
+        if str(r.get("마감유형", "")) == "fixed" and deadline_str:
+            try:
+                d = datetime.strptime(deadline_str, "%Y-%m-%d").date()
+                diff = (d - today).days
+                if 0 <= diff <= upcoming_days:
+                    upcoming.append({
+                        "company": r.get("회사명", ""),
+                        "position": r.get("포지션", ""),
+                        "deadline": deadline_str,
+                        "days_left": diff,
+                        "status": st,
+                    })
+            except ValueError:
+                pass
+
+        created = str(r.get("등록일", "") or "")
+        try:
+            cd = datetime.strptime(created, "%Y-%m-%d").date()
+            if 0 <= (today - cd).days <= 7:
+                new_this_week += 1
+        except ValueError:
+            pass
+
+    upcoming.sort(key=lambda x: x["days_left"])
+    role_counts = dict(sorted(role_counts.items(), key=lambda kv: -kv[1]))
+
+    return {
+        "total": len(rows),
+        "status_counts": status_counts,
+        "role_counts": role_counts,
+        "upcoming": upcoming,
+        "rolling": rolling,
+        "new_this_week": new_this_week,
+    }
 
 
 def send_notifications(jobs: list[dict]) -> bool:

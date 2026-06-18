@@ -198,14 +198,17 @@ streamlit run src/app.py
 
 실행하면 자동으로 브라우저에 화면이 열립니다 (안 열리면 터미널에 표시되는 `http://localhost:8501` 주소를 직접 열어주세요).
 
-| 탭 | 동작 |
+좌측 **사이드바 메뉴**에서 화면을 전환합니다:
+
+| 메뉴 | 동작 |
 |------|------|
+| **대시보드** | 총 저장·마감 임박(D-7)·이번 주 신규 KPI + 직군별/상태별 분포 + 마감 임박 목록을 한눈에 |
 | **수집** | URL을 붙여넣고 `수집` → 미리보기에서 내용 확인·수정 → `저장` |
 | **목록** | 저장된 공고 보기 (로컬 캐시 / Google Sheets 전환) |
 | **마감 알림** | 마감 임박 공고 조회 → `Slack으로 발송` |
 | **상태 변경** | 공고 선택 → 상태(관심/지원완료/면접/마감) 변경 |
 
-왼쪽 사이드바에서 API 키·인증 파일 설정 상태를 한눈에 확인할 수 있습니다.
+사이드바 **하단**에서 API 키·인증 파일 설정 상태(환경 상태)를 한눈에 확인할 수 있습니다. 직군 분류(Backend/Data/AI 등)는 규칙 기반으로 자동 계산됩니다.
 
 > 수집할 때 크롤링용 브라우저 창이 잠깐 떴다 닫힙니다 (봇 차단 회피를 위한 정상 동작입니다).
 > 종료하려면 터미널에서 `Ctrl + C`를 누릅니다.
@@ -362,7 +365,8 @@ jobmate-ai/
 ├── src/                 # 앱 소스
 │   ├── app.py           # 웹 화면 (Streamlit)
 │   ├── main.py          # 터미널 프로그램 (인터랙티브 + add/list/notify/status)
-│   ├── service.py       # 공통 로직 (웹·터미널이 함께 사용)
+│   ├── service.py       # 공통 로직 (웹·터미널 공유) + 대시보드 집계
+│   ├── classify.py      # 규칙 기반 직군 분류 (Backend/Data/AI 등)
 │   ├── config.py        # 설정값 (경로·시크릿)
 │   ├── sheets.py        # Google Sheets 연동
 │   ├── slack.py         # Slack 알림
@@ -375,7 +379,8 @@ jobmate-ai/
 │       └── fallback.py  # 기타 사이트 (Gemini AI 자동 추출)
 ├── tests/               # 테스트 스크립트
 │   ├── test_parsers.py  # 전용 파서 테스트
-│   └── test_fallback.py # 폴백 파서 테스트
+│   ├── test_fallback.py # 폴백 파서 테스트
+│   └── test_classify.py # 직군 분류 테스트
 ├── scripts/
 │   └── cron_notify.sh   # 자동 알림 스크립트 (cron)
 ├── data/                # 런타임 (GitHub 제외)

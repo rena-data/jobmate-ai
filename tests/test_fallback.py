@@ -80,7 +80,7 @@ async def test_fetch_and_extract(parser: FallbackParser, name: str, url: str) ->
 
 async def test_gemini(parser: FallbackParser, text: str, name: str) -> dict | None:
     """Phase 2: Gemini 파싱 테스트."""
-    console.print(f"[cyan]  3) Gemini 구조화 추출...[/cyan]")
+    console.print("[cyan]  3) Gemini 구조화 추출...[/cyan]")
     try:
         data = parser._extract_with_gemini(text)
         filled = sum(1 for v in data.values() if v)
