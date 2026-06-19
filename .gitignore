@@ -8,6 +8,7 @@ __pycache__/
 .venv/
 docs/
 .claude/
+.superpowers/
 /tmp/jobmate_cron.log
 /data/
 

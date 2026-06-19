@@ -44,6 +44,35 @@ PARSERS = [
 # 상태 값 재노출 (sheets.VALID_STATUSES와 동일)
 VALID_STATUSES = sheets.VALID_STATUSES
 
+# 상태 → 한글 라벨 (UI 공용). "closed"는 레거시 시트값 표시용.
+STATUS_LABELS = {
+    "interest": "관심",
+    "applied": "지원완료",
+    "document_pass": "서류합격",
+    "interview": "면접",
+    "final_pass": "최종합격",
+    "rejected": "불합격",
+    "hold": "보류",
+    "closed": "마감",
+}
+
+# URL 도메인 → 플랫폼명 (대시보드 플랫폼별 집계용)
+_PLATFORMS = [
+    ("원티드", "wanted.co.kr"),
+    ("사람인", "saramin.co.kr"),
+    ("잡코리아", "jobkorea.co.kr"),
+    ("그룹바이", "groupby.kr"),
+]
+
+
+def platform_of(url: str) -> str:
+    """공고 URL에서 출처 플랫폼명을 추정. 매칭 없으면 '기타'."""
+    u = (url or "").lower()
+    for name, domain in _PLATFORMS:
+        if domain in u:
+            return name
+    return "기타"
+
 
 @dataclass
 class CollectResult:
@@ -254,6 +283,12 @@ def find_upcoming(days: int | None = None) -> list[dict]:
     return sheets.get_upcoming_deadlines(days=days)
 
 
+def find_stale_applications(days: int | None = None) -> list[dict]:
+    if days is None:
+        days = config.STALE_APPLY_DAYS
+    return sheets.get_stale_applications(days=days)
+
+
 def dashboard_summary(rows: list[dict], upcoming_days: int = 7) -> dict:
     """저장된 공고 행(get_all_posts 형식)을 집계해 대시보드용 통계 반환.
 
@@ -261,11 +296,14 @@ def dashboard_summary(rows: list[dict], upcoming_days: int = 7) -> dict:
     직군은 classify_role로 온더플라이 분류(시트 컬럼 불필요).
     """
     today = date.today()
-    status_counts = {"interest": 0, "applied": 0, "interview": 0, "closed": 0}
+    status_counts = {s: 0 for s in VALID_STATUSES}
     role_counts: dict[str, int] = {}
+    new_role_counts: dict[str, int] = {}
     upcoming: list[dict] = []
     rolling = 0
     new_this_week = 0
+    platforms: dict[str, dict] = {}
+    recent_all: list[dict] = []
 
     for r in rows:
         st = str(r.get("상태", "") or "interest")
@@ -277,6 +315,29 @@ def dashboard_summary(rows: list[dict], upcoming_days: int = 7) -> dict:
 
         if str(r.get("마감유형", "")) == "rolling":
             rolling += 1
+
+        url = str(r.get("URL", "") or "")
+        plat = platform_of(url)
+        pc = platforms.setdefault(
+            plat,
+            {"platform": plat, "collected": 0, "new_week": 0, "closed": 0, "last_collected": ""},
+        )
+        pc["collected"] += 1
+
+        created = str(r.get("등록일", "") or "")
+        is_new = False
+        try:
+            cd = datetime.strptime(created, "%Y-%m-%d").date()
+            if 0 <= (today - cd).days <= 7:
+                new_this_week += 1
+                is_new = True
+            if created > pc["last_collected"]:
+                pc["last_collected"] = created
+        except ValueError:
+            pass
+        if is_new:
+            pc["new_week"] += 1
+            new_role_counts[role] = new_role_counts.get(role, 0) + 1
 
         deadline_str = str(r.get("마감일(파싱)", "") or "")
         if str(r.get("마감유형", "")) == "fixed" and deadline_str:
@@ -291,19 +352,25 @@ def dashboard_summary(rows: list[dict], upcoming_days: int = 7) -> dict:
                         "days_left": diff,
                         "status": st,
                     })
+                elif diff < 0:
+                    pc["closed"] += 1
             except ValueError:
                 pass
 
-        created = str(r.get("등록일", "") or "")
-        try:
-            cd = datetime.strptime(created, "%Y-%m-%d").date()
-            if 0 <= (today - cd).days <= 7:
-                new_this_week += 1
-        except ValueError:
-            pass
+        recent_all.append({
+            "company": r.get("회사명", ""),
+            "position": r.get("포지션", ""),
+            "status": st,
+            "url": url,
+            "created": created,
+            "is_new": is_new,
+        })
 
     upcoming.sort(key=lambda x: x["days_left"])
     role_counts = dict(sorted(role_counts.items(), key=lambda kv: -kv[1]))
+    platform_counts = sorted(platforms.values(), key=lambda p: -p["collected"])
+    recent = sorted(recent_all, key=lambda x: x["created"], reverse=True)[:5]
+    new_top_roles = sorted(new_role_counts.items(), key=lambda kv: -kv[1])[:2]
 
     return {
         "total": len(rows),
@@ -312,6 +379,14 @@ def dashboard_summary(rows: list[dict], upcoming_days: int = 7) -> dict:
         "upcoming": upcoming,
         "rolling": rolling,
         "new_this_week": new_this_week,
+        "platform_counts": platform_counts,
+        "recent": recent,
+        "insights": {
+            "new_total": new_this_week,
+            "new_top_roles": new_top_roles,
+            "upcoming_count": len(upcoming),
+            "interest_not_applied": status_counts.get("interest", 0),
+        },
     }
 
 
@@ -320,7 +395,7 @@ def send_notifications(jobs: list[dict]) -> bool:
 
 
 def mark_all_notified(jobs: list[dict]) -> None:
-    """발송 완료 표시 (기존 main.py:381-385 — 개별 실패는 무시)."""
+    """마감 알림 발송 완료 표시 (개별 실패는 무시)."""
     for job in jobs:
         try:
             sheets.mark_notified(job["url"])
@@ -328,9 +403,27 @@ def mark_all_notified(jobs: list[dict]) -> None:
             pass
 
 
+def send_application_reminders(jobs: list[dict]) -> bool:
+    return slack.send_application_reminder(jobs)
+
+
+def mark_all_reminded(jobs: list[dict]) -> None:
+    """지원 후속 리마인더 발송 완료 표시 (개별 실패는 무시)."""
+    for job in jobs:
+        try:
+            sheets.mark_reminder_sent(job["url"])
+        except Exception:
+            pass
+
+
 def change_status(url: str, status: str) -> bool:
     canonical = canonicalize_url(url)
     return sheets.update_status(canonical, status)
+
+
+def update_memo(url: str, memo: str) -> bool:
+    canonical = canonicalize_url(url)
+    return sheets.update_memo(canonical, memo)
 
 
 def health() -> dict:

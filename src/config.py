@@ -33,3 +33,6 @@ CHECK_ROBOTS_TXT = True     # robots.txt 확인 여부
 
 # Deadline
 NOTIFY_DAYS_BEFORE = 2  # D-2 알림
+
+# 지원 후 N일 경과 시 후속 리마인더 (지원완료 상태 + 무진행)
+STALE_APPLY_DAYS = 7

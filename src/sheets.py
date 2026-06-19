@@ -35,6 +35,16 @@ def _get_sheet(worksheet_name: str = "Job Posts") -> gspread.Worksheet:
     return ws
 
 
+def _ensure_column(ws: gspread.Worksheet, name: str) -> int:
+    """헤더에 name 컬럼이 없으면 끝에 추가하고, 1-based 컬럼 인덱스를 반환."""
+    headers = ws.row_values(1)
+    if name in headers:
+        return headers.index(name) + 1
+    col_idx = len(headers) + 1
+    ws.update_cell(1, col_idx, name)
+    return col_idx
+
+
 def is_url_exists(url: str) -> bool:
     """시트에 이미 해당 URL이 존재하는지 확인."""
     ws = _get_sheet()
@@ -77,8 +87,9 @@ def get_upcoming_deadlines(days: int = 2) -> list[dict]:
         if notified_at:
             continue
 
-        # 마감됨/지원완료는 스킵
-        if status in ("closed", "applied"):
+        # 이미 지원했거나 종료/보류된 건은 마감 알림 제외
+        # (legacy "closed" 포함)
+        if status in ("applied", "final_pass", "rejected", "hold", "closed"):
             continue
 
         if deadline_type != "fixed" or not deadline_str:
@@ -104,11 +115,16 @@ def get_upcoming_deadlines(days: int = 2) -> list[dict]:
     return upcoming
 
 
-VALID_STATUSES = ["interest", "applied", "interview", "closed"]
+# 지원 파이프라인 상태 (관심→지원완료→서류합격→면접→최종합격, +불합격/보류).
+# legacy "closed"는 표시용으로만 허용하고 신규 선택지에서는 제외.
+VALID_STATUSES = [
+    "interest", "applied", "document_pass", "interview", "final_pass",
+    "rejected", "hold",
+]
 
 
 def update_status(url: str, status: str) -> bool:
-    """공고의 지원 상태를 업데이트."""
+    """공고의 지원 상태를 업데이트. '지원완료' 전환 시 '지원일'을 기록한다."""
     ws = _get_sheet()
     headers = ws.row_values(1)
 
@@ -119,24 +135,85 @@ def update_status(url: str, status: str) -> bool:
     urls = ws.col_values(1)
     for i, u in enumerate(urls):
         if u == url:
-            ws.update_cell(i + 1, status_col, status)
+            row_idx = i + 1
+            ws.update_cell(row_idx, status_col, status)
+            # 지원완료로 바뀌면 '지원일'을 한 번만 기록 (기존 값 보존)
+            if status == "applied":
+                applied_col = _ensure_column(ws, "지원일")
+                if not ws.cell(row_idx, applied_col).value:
+                    ws.update_cell(row_idx, applied_col, date.today().isoformat())
+            return True
+    return False
+
+
+def update_memo(url: str, memo: str) -> bool:
+    """공고의 비고(메모)를 업데이트. update_status와 동일 패턴."""
+    ws = _get_sheet()
+    headers = ws.row_values(1)
+
+    if "비고" not in headers:
+        return False
+    memo_col = headers.index("비고") + 1
+
+    urls = ws.col_values(1)
+    for i, u in enumerate(urls):
+        if u == url:
+            ws.update_cell(i + 1, memo_col, memo)
             return True
     return False
 
 
 def mark_notified(url: str) -> None:
-    """알림 발송 완료 표시."""
+    """마감 알림 발송 완료 표시."""
     ws = _get_sheet()
-    headers = ws.row_values(1)
+    col_idx = _ensure_column(ws, "알림발송일")
+    urls = ws.col_values(1)
+    for i, u in enumerate(urls):
+        if u == url:
+            ws.update_cell(i + 1, col_idx, date.today().isoformat())
+            return
 
-    # "알림발송일" 컬럼 확인/추가
-    if "알림발송일" not in headers:
-        col_idx = len(headers) + 1
-        ws.update_cell(1, col_idx, "알림발송일")
-    else:
-        col_idx = headers.index("알림발송일") + 1
 
-    # URL로 행 찾기
+def get_stale_applications(days: int = 7) -> list[dict]:
+    """지원완료 후 days일 이상 경과 + 후속 리마인더 미발송 공고 목록."""
+    ws = _get_sheet()
+    records = ws.get_all_records()
+
+    today = date.today()
+    stale = []
+
+    for row in records:
+        if str(row.get("상태", "")) != "applied":
+            continue
+        applied_str = str(row.get("지원일", "") or "")
+        if not applied_str:
+            continue
+        # 이미 리마인더 보낸 건은 스킵
+        if str(row.get("지원리마인더발송일", "") or ""):
+            continue
+        try:
+            applied = datetime.strptime(applied_str, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+
+        elapsed = (today - applied).days
+        if elapsed >= days:
+            stale.append({
+                "company": row.get("회사명", ""),
+                "company_type": row.get("업종", ""),
+                "position": row.get("포지션", ""),
+                "applied_date": applied_str,
+                "elapsed": elapsed,
+                "url": row.get("URL", ""),
+            })
+
+    return stale
+
+
+def mark_reminder_sent(url: str) -> None:
+    """지원 후속 리마인더 발송 완료 표시."""
+    ws = _get_sheet()
+    col_idx = _ensure_column(ws, "지원리마인더발송일")
     urls = ws.col_values(1)
     for i, u in enumerate(urls):
         if u == url:
