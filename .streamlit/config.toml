@@ -1,0 +1,10 @@
+# JobMate AI 테마 B — 라이트 본문 + 네이비 사이드바
+[theme]
+base = "light"
+primaryColor = "#1B2A4A"
+
+[theme.sidebar]
+backgroundColor = "#1B2A4A"
+secondaryBackgroundColor = "#22335A"
+textColor = "#E8ECF5"
+primaryColor = "#9FB3DD"

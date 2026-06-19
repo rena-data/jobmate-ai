@@ -227,32 +227,41 @@ def add(
 def notify(
     auto: bool = typer.Option(False, "--auto", "-a", help="확인 없이 자동 발송 (cron용)"),
 ):
-    """마감 D-2 이내 공고를 확인하고 Slack 알림을 발송합니다."""
+    """마감 임박(D-2) + 지원 후 N일 경과 공고를 확인하고 Slack 알림을 발송합니다."""
     logger.info("notify 실행")
-    console.print("[cyan]마감 임박 공고 확인 중...[/cyan]")
+    console.print("[cyan]마감 임박 / 지원 후속 공고 확인 중...[/cyan]")
 
     try:
         upcoming = service.find_upcoming(config.NOTIFY_DAYS_BEFORE)
+        stale = service.find_stale_applications(config.STALE_APPLY_DAYS)
     except Exception as e:
         console.print(f"[red]시트 조회 실패: {e}[/red]")
         raise typer.Exit(1)
 
-    if not upcoming:
-        console.print("[dim]마감 임박 공고가 없습니다.[/dim]")
+    if not upcoming and not stale:
+        console.print("[dim]알림 대상 공고가 없습니다.[/dim]")
         raise typer.Exit()
 
-    # 결과 표시
-    table = Table(title=f"마감 임박 공고 ({len(upcoming)}건)")
-    table.add_column("회사", style="bold")
-    table.add_column("포지션")
-    table.add_column("마감일")
-    table.add_column("D-day", style="red bold")
+    if upcoming:
+        table = Table(title=f"마감 임박 공고 ({len(upcoming)}건)")
+        table.add_column("회사", style="bold")
+        table.add_column("포지션")
+        table.add_column("마감일")
+        table.add_column("D-day", style="red bold")
+        for job in upcoming:
+            days_text = "오늘!" if job["days_left"] == 0 else f"D-{job['days_left']}"
+            table.add_row(job["company"], job["position"], job["deadline"], days_text)
+        console.print(table)
 
-    for job in upcoming:
-        days_text = "오늘!" if job["days_left"] == 0 else f"D-{job['days_left']}"
-        table.add_row(job["company"], job["position"], job["deadline"], days_text)
-
-    console.print(table)
+    if stale:
+        table = Table(title=f"지원 후 {config.STALE_APPLY_DAYS}일+ 경과 ({len(stale)}건)")
+        table.add_column("회사", style="bold")
+        table.add_column("포지션")
+        table.add_column("지원일")
+        table.add_column("경과", style="yellow bold")
+        for job in stale:
+            table.add_row(job["company"], job["position"], job["applied_date"], f"{job['elapsed']}일")
+        console.print(table)
 
     # Slack 발송
     if not auto:
@@ -260,20 +269,33 @@ def notify(
         if not confirm:
             raise typer.Exit()
 
-    success = service.send_notifications(upcoming)
-    if success:
-        service.mark_all_notified(upcoming)
-        logger.info(f"Slack 알림 발송 완료: {len(upcoming)}건")
-        console.print("[green]Slack 알림 발송 완료![/green]")
-    else:
-        logger.error("Slack 발송 실패")
-        console.print("[red]Slack 발송 실패[/red]")
+    sent_any = False
+    if upcoming:
+        if service.send_notifications(upcoming):
+            service.mark_all_notified(upcoming)
+            logger.info(f"마감 알림 발송: {len(upcoming)}건")
+            console.print(f"[green]마감 알림 발송 완료! ({len(upcoming)}건)[/green]")
+            sent_any = True
+        else:
+            logger.error("마감 알림 발송 실패")
+            console.print("[red]마감 알림 발송 실패[/red]")
+    if stale:
+        if service.send_application_reminders(stale):
+            service.mark_all_reminded(stale)
+            logger.info(f"지원 후속 리마인더 발송: {len(stale)}건")
+            console.print(f"[green]지원 후속 리마인더 발송 완료! ({len(stale)}건)[/green]")
+            sent_any = True
+        else:
+            logger.error("지원 후속 리마인더 발송 실패")
+            console.print("[red]지원 후속 리마인더 발송 실패[/red]")
+    if not sent_any:
+        console.print("[dim]발송된 알림이 없습니다.[/dim]")
 
 
 @app.command()
 def status(
     url: str = typer.Argument(..., help="상태를 변경할 공고 URL"),
-    new_status: str = typer.Argument(..., help="변경할 상태 (interest / applied / interview / closed)"),
+    new_status: str = typer.Argument(..., help="변경할 상태 (interest/applied/document_pass/interview/final_pass/rejected/hold)"),
 ):
     """공고의 지원 상태를 변경합니다."""
     if new_status not in service.VALID_STATUSES:
@@ -314,7 +336,11 @@ def list_posts(
         STATUS_STYLE = {
             "interest": "[dim]관심[/dim]",
             "applied": "[green]지원완료[/green]",
+            "document_pass": "[cyan]서류합격[/cyan]",
             "interview": "[cyan]면접[/cyan]",
+            "final_pass": "[bold green]최종합격[/bold green]",
+            "rejected": "[red]불합격[/red]",
+            "hold": "[yellow]보류[/yellow]",
             "closed": "[red]마감[/red]",
         }
 
