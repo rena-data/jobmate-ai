@@ -70,7 +70,12 @@ def save_job_post(post: JobPost) -> None:
 
 
 def get_upcoming_deadlines(days: int = 2) -> list[dict]:
-    """마감일이 days일 이내인 공고 목록 반환."""
+    """마감일이 days일 이내인 공고 목록 반환.
+
+    각 항목에 'notified'(알림발송일 문자열, 미발송이면 "")를 함께 담는다.
+    알림 발송 이력으로는 제외하지 않는다 — 같은 공고도 다시 발송할 수 있다.
+    (중복 방지는 '수집 데이터'에만 적용. 'notified'는 마지막 발송일 표시용일 뿐 필터 아님.)
+    """
     ws = _get_sheet()
     records = ws.get_all_records()
 
@@ -80,16 +85,13 @@ def get_upcoming_deadlines(days: int = 2) -> list[dict]:
     for row in records:
         deadline_str = row.get("마감일(파싱)", "")
         deadline_type = row.get("마감유형", "")
-        notified_at = row.get("알림발송일", "")
+        notified_at = str(row.get("알림발송일", "") or "")
         status = row.get("상태", "")
 
-        # 이미 알림 보낸 것은 스킵
-        if notified_at:
-            continue
-
-        # 이미 지원했거나 종료/보류된 건은 마감 알림 제외
+        # 이미 지원했거나 탈락/종료/보류된 건은 마감 알림 제외
         # (legacy "closed" 포함)
-        if status in ("applied", "final_pass", "rejected", "hold", "closed"):
+        if status in ("applied", "document_fail", "interview_fail",
+                      "final_pass", "rejected", "hold", "closed"):
             continue
 
         if deadline_type != "fixed" or not deadline_str:
@@ -110,16 +112,17 @@ def get_upcoming_deadlines(days: int = 2) -> list[dict]:
                 "deadline": deadline_str,
                 "url": row.get("URL", ""),
                 "days_left": diff,
+                "notified": notified_at,
             })
 
     return upcoming
 
 
-# 지원 파이프라인 상태 (관심→지원완료→서류합격→면접→최종합격, +불합격/보류).
-# legacy "closed"는 표시용으로만 허용하고 신규 선택지에서는 제외.
+# 지원 파이프라인 상태 (관심공고→지원완료→서류탈락/서류합격→면접예정→면접탈락→
+# 최종합격, +불합격/보류). legacy "closed"는 표시용으로만 허용하고 신규 선택지에서는 제외.
 VALID_STATUSES = [
-    "interest", "applied", "document_pass", "interview", "final_pass",
-    "rejected", "hold",
+    "interest", "applied", "document_fail", "document_pass",
+    "interview", "interview_fail", "final_pass", "rejected", "hold",
 ]
 
 
@@ -218,4 +221,87 @@ def mark_reminder_sent(url: str) -> None:
     for i, u in enumerate(urls):
         if u == url:
             ws.update_cell(i + 1, col_idx, date.today().isoformat())
+            return
+
+
+# ---------------------------------------------------------------------------
+# 자동 수집 (auto-collect) — 신규 기능
+# ---------------------------------------------------------------------------
+KEYWORD_SHEET_NAME = "키워드 관리"
+
+
+def get_keywords() -> list[str]:
+    """'키워드 관리' 탭에서 활성 검색 키워드 목록을 읽는다.
+
+    헤더 '키워드'(필수) + '사용'(선택, N/FALSE/0/미사용이면 제외)을 본다.
+    탭이 없으면 빈 리스트 → 호출자가 config 기본값으로 폴백.
+    (_get_sheet는 미사용 — 자동 생성 시 공고용 헤더가 붙는 것을 피한다.)
+    """
+    client = _get_client()
+    ss = client.open_by_key(config.GOOGLE_SHEETS_ID)
+    try:
+        ws = ss.worksheet(KEYWORD_SHEET_NAME)
+    except gspread.WorksheetNotFound:
+        return []
+
+    out: list[str] = []
+    for r in ws.get_all_records():
+        kw = str(r.get("키워드", "") or "").strip()
+        if not kw:
+            continue
+        use = str(r.get("사용", "Y") or "Y").strip().upper()
+        if use in ("N", "FALSE", "0", "미사용", "X"):
+            continue
+        out.append(kw)
+    return out
+
+
+def save_keywords(keywords: list[str]) -> None:
+    """'키워드 관리' 탭을 (없으면 생성 후) 헤더 + 키워드 목록으로 덮어쓴다.
+
+    공백 제거 + 순서 보존 중복 제거. '사용' 컬럼은 모두 Y로 기록한다.
+    """
+    client = _get_client()
+    ss = client.open_by_key(config.GOOGLE_SHEETS_ID)
+    try:
+        ws = ss.worksheet(KEYWORD_SHEET_NAME)
+    except gspread.WorksheetNotFound:
+        ws = ss.add_worksheet(title=KEYWORD_SHEET_NAME, rows=200, cols=4)
+
+    seen: set[str] = set()
+    clean: list[str] = []
+    for kw in keywords:
+        k = str(kw).strip()
+        if k and k not in seen:
+            seen.add(k)
+            clean.append(k)
+
+    rows = [["키워드", "사용"]] + [[k, "Y"] for k in clean]
+    ws.clear()
+    ws.append_rows(rows)
+
+
+def annotate_collection(
+    url: str, *, search_keyword: str, platform: str,
+    is_new: str = "Y", method: str = "자동",
+) -> None:
+    """자동 수집 메타데이터를 해당 URL 행에 기록.
+
+    기존 15컬럼 positional 레이아웃(JobPost.to_sheet_row)은 건드리지 않고,
+    _ensure_column으로 끝열에 메타 컬럼을 추가/사용한다 (mark_notified 패턴).
+    수동 수집 행은 이 컬럼들이 비어 있어 자동/수동 구분이 가능하다.
+    """
+    ws = _get_sheet()
+    kw_col = _ensure_column(ws, "검색키워드")
+    plat_col = _ensure_column(ws, "수집플랫폼")
+    new_col = _ensure_column(ws, "신규여부")
+    method_col = _ensure_column(ws, "수집방식")
+    urls = ws.col_values(1)
+    for i, u in enumerate(urls):
+        if u == url:
+            row = i + 1
+            ws.update_cell(row, kw_col, search_keyword)
+            ws.update_cell(row, plat_col, platform)
+            ws.update_cell(row, new_col, is_new)
+            ws.update_cell(row, method_col, method)
             return

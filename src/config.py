@@ -36,3 +36,17 @@ NOTIFY_DAYS_BEFORE = 2  # D-2 알림
 
 # 지원 후 N일 경과 시 후속 리마인더 (지원완료 상태 + 무진행)
 STALE_APPLY_DAYS = 7
+
+# ---------------------------------------------------------------------------
+# 자동 수집 (auto-collect) — 신규 기능. 기존 수동 수집 동작에는 영향 없음.
+# 키워드는 'AUTOCOLLECT_KEYWORDS'를 기본값으로 쓰되, Google Sheets '키워드 관리'
+# 탭이 있으면 그쪽을 우선 사용한다 (service.resolve_keywords).
+# ---------------------------------------------------------------------------
+AUTOCOLLECT_KEYWORDS = [
+    "AX", "바이브코딩", "AI기획", "AI Engineer",
+    "LLM", "Prompt Engineer", "AI Product Manager",
+]
+# 자동 수집 대상 플랫폼 (전용 파서 보유분만). 점핏은 다음 라운드, 로켓펀치는 봇차단으로 제외.
+AUTOCOLLECT_PLATFORMS = ["원티드", "사람인", "잡코리아"]
+# 키워드 × 플랫폼 당 최대 신규 후보 URL 수 (과도한 크롤링 방지)
+AUTOCOLLECT_LIMIT_PER = 10

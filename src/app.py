@@ -70,6 +70,9 @@ DEFAULTS = {
     "status_records": None,    # 상태 변경 탭 공고 목록 캐시
     "dash_rows": None,         # 대시보드 탭 데이터 캐시
     "detail_opened_url": None, # 상세 모달 재오픈 가드 (목록 행 선택)
+    "autocollect_kw_text": None,  # 키워드 자동 수집 입력 텍스트(세션 유지)
+    "autocollect_result": None,   # 직전 자동 수집 결과(AutoCollectResult)
+    "cache_clear_confirm": False, # 로컬 캐시 비우기 확인 토글
 }
 for _k, _v in DEFAULTS.items():
     st.session_state.setdefault(_k, _v)
@@ -148,6 +151,15 @@ def _render_job_detail_dialog(record: dict) -> None:
         st.caption(meta)
     if record.get("회사설명"):
         st.write(record["회사설명"])
+
+    # 수집 정보 (자동/수동 구분 — 신규 자동 수집 메타데이터)
+    collected_via = record.get("수집방식", "") or "수동"
+    src_plat = record.get("수집플랫폼", "") or service.platform_of(url)
+    keyword = record.get("검색키워드", "")
+    collect_meta = f"📥 수집 {collected_via} · {src_plat}"
+    if keyword:
+        collect_meta += f" · 키워드 '{keyword}'"
+    st.caption(collect_meta)
 
     deadline = record.get("마감일(파싱)", "") or record.get("마감일(원본)", "")
     dday = _dday_text(record.get("마감일(파싱)", ""), record.get("마감유형", ""))
@@ -241,6 +253,129 @@ def _render_collect_tab() -> None:
 
     if st.session_state.pending_post is not None:
         _render_preview_and_save()
+
+    st.divider()
+    _render_keyword_autocollect()
+
+
+def _parse_keywords(text: str) -> list[str]:
+    """줄바꿈/쉼표 구분 텍스트 → 순서 보존 + 중복 제거 키워드 리스트."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for chunk in (text or "").replace(",", "\n").splitlines():
+        k = chunk.strip()
+        if k and k not in seen:
+            seen.add(k)
+            out.append(k)
+    return out
+
+
+def _render_keyword_autocollect() -> None:
+    """키워드로 플랫폼을 검색해 신규 공고를 자동 수집하는 섹션 (실행 + 키워드 저장)."""
+    st.markdown("### 🔍 키워드 자동 수집")
+    st.caption("키워드로 채용 플랫폼을 검색해 신규 공고를 자동 수집합니다 (원티드·사람인·잡코리아). "
+               "저장한 키워드는 cron/CLI 자동 수집에도 사용됩니다.")
+
+    # 최초 1회: '키워드 관리' 시트(없으면 config 기본값)에서 키워드를 불러와 입력란을 채움
+    if st.session_state.autocollect_kw_text is None:
+        try:
+            kws = service.resolve_keywords()
+        except Exception:
+            kws = list(config.AUTOCOLLECT_KEYWORDS)
+        st.session_state.autocollect_kw_text = "\n".join(kws)
+
+    st.text_area(
+        "검색 키워드 (한 줄에 하나 또는 쉼표로 구분 — 단일·다중 모두 가능)",
+        key="autocollect_kw_text",
+        height=120,
+        placeholder="AX\n바이브코딩\nAI Engineer",
+    )
+    keywords = _parse_keywords(st.session_state.autocollect_kw_text)
+
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        platforms = st.multiselect(
+            "대상 플랫폼",
+            options=list(config.AUTOCOLLECT_PLATFORMS),
+            default=list(config.AUTOCOLLECT_PLATFORMS),
+            key="autocollect_platforms",
+        )
+    with c2:
+        limit = int(st.number_input(
+            "키워드×플랫폼 당 최대 수집",
+            min_value=1, max_value=50,
+            value=config.AUTOCOLLECT_LIMIT_PER, step=1,
+            key="autocollect_limit",
+        ))
+
+    st.caption(f"입력 키워드 {len(keywords)}개 · 예상 최대 "
+               f"{len(keywords) * len(platforms) * limit}건 수집")
+
+    b1, b2, _ = st.columns([1.6, 1.2, 4])
+    run = b1.button("🚀 자동 수집 실행", type="primary", key="autocollect_run",
+                    disabled=not keywords or not platforms)
+    save_only = b2.button("💾 키워드만 저장", key="autocollect_save",
+                          disabled=not keywords)
+
+    if save_only:
+        try:
+            service.save_keywords(keywords)
+            st.success(f"키워드 {len(keywords)}개를 '키워드 관리' 시트에 저장했습니다.")
+        except Exception as e:
+            st.error(f"키워드 저장 실패: {e}")
+
+    if run:
+        # 사용자 결정: 실행 + 저장 둘 다
+        try:
+            service.save_keywords(keywords)
+        except Exception as e:
+            st.warning(f"키워드 저장은 실패했지만 수집은 진행합니다: {e}")
+
+        result = None
+        with st.status("키워드 검색 + 수집 중… (사람인은 브라우저 창이 잠깐 열립니다)",
+                       expanded=True) as box:
+            try:
+                result = service.auto_collect(keywords, platforms, limit)
+                box.update(
+                    label=f"완료 — 신규 {result.new} / 중복 {result.duplicate} / 실패 {result.failed}",
+                    state="complete",
+                )
+            except Exception as e:  # 백스톱: 트레이스백 노출 금지
+                box.update(label="자동 수집 실패", state="error")
+                st.error(f"예기치 못한 오류: {e}")
+
+        if result is not None:
+            st.session_state.autocollect_result = result
+            # 신규 수집분이 목록/대시보드에 반영되도록 캐시 무효화
+            st.session_state.jobs_cache = None
+            st.session_state.dash_rows = None
+            st.session_state.status_records = None
+
+    if st.session_state.autocollect_result is not None:
+        _render_autocollect_result(st.session_state.autocollect_result)
+
+
+def _render_autocollect_result(res) -> None:
+    st.markdown("##### 자동 수집 결과")
+    stat_view = [
+        {"키워드": s.keyword, "플랫폼": s.platform, "발견": s.discovered,
+         "신규": s.new, "중복": s.duplicate, "실패": s.failed}
+        for s in res.stats
+    ]
+    if stat_view:
+        st.dataframe(stat_view, width="stretch", hide_index=True)
+    new_items = [it for it in res.items if it.outcome == "new"]
+    if new_items:
+        st.markdown(f"**신규 수집 공고 ({len(new_items)}건)**")
+        st.dataframe(
+            [{"플랫폼": it.platform, "회사": it.company, "포지션": it.position}
+             for it in new_items],
+            width="stretch", hide_index=True,
+        )
+    for err in res.errors:
+        st.warning(f"⚠ {err}")
+    st.info(f"발견 {res.discovered} / 신규 {res.new} / "
+            f"중복 {res.duplicate} / 실패 {res.failed}")
 
 
 def _handle_collect(url: str) -> None:
@@ -399,6 +534,8 @@ def _render_list_tab() -> None:
                 "마감일": r.get("마감일(파싱)", "") or r.get("마감일(원본)", ""),
                 "상태": service.STATUS_LABELS.get(str(r.get("상태", "")), r.get("상태", "")),
                 "등록일": r.get("등록일", ""),
+                "수집방식": r.get("수집방식", "") or "수동",
+                "검색키워드": r.get("검색키워드", ""),
             }
             for r in records
         ]
@@ -431,6 +568,21 @@ def _render_list_tab() -> None:
         st.dataframe(view, width="stretch", hide_index=True)
         st.caption("ⓘ 상세 보기는 'Google Sheets (온라인)' 소스에서 지원됩니다.")
 
+        st.divider()
+        confirm = st.checkbox(
+            "로컬 캐시를 비우면 되돌릴 수 없습니다 (Google Sheets 데이터는 유지).",
+            key="cache_clear_confirm",
+        )
+        if st.button("🗑️ 로컬 캐시 비우기", disabled=not confirm, key="cache_clear_btn"):
+            try:
+                service.clear_cache()
+            except Exception as e:
+                st.error(f"캐시 비우기 실패: {e}")
+            else:
+                st.session_state.jobs_cache = None
+                st.success("로컬 캐시를 비웠습니다.")
+                st.rerun()
+
 
 # ---------------------------------------------------------------------------
 # 탭 3: 마감 알림
@@ -449,7 +601,6 @@ def _render_deadline_section() -> None:
         try:
             with st.spinner("시트 조회 중…"):
                 st.session_state.upcoming_jobs = service.find_upcoming(config.NOTIFY_DAYS_BEFORE)
-            st.session_state.notify_sent = False
         except Exception as e:
             st.error(f"시트 조회 실패: {e}")
             st.session_state.upcoming_jobs = None
@@ -467,16 +618,14 @@ def _render_deadline_section() -> None:
             "포지션": j.get("position", ""),
             "마감일": j.get("deadline", ""),
             "D-day": "오늘!" if j.get("days_left") == 0 else f"D-{j.get('days_left')}",
+            "마지막 발송": j.get("notified") or "—",
         }
         for j in jobs
     ]
     st.dataframe(view, width="stretch", hide_index=True)
 
-    if st.session_state.notify_sent:
-        st.success("이미 발송했습니다.")
-        return
-
-    if st.button("📨 Slack으로 발송", type="primary", key="notify_send"):
+    # 발송 이력과 무관하게 항상 다시 보낼 수 있다 (사용자가 직접 제어)
+    if st.button(f"📨 Slack으로 발송 ({len(jobs)}건)", type="primary", key="notify_send"):
         try:
             ok = service.send_notifications(jobs)
         except Exception as e:
@@ -484,8 +633,9 @@ def _render_deadline_section() -> None:
             return
         if ok:
             service.mark_all_notified(jobs)
-            st.session_state.notify_sent = True
-            st.success(f"Slack 알림 발송 완료! ({len(jobs)}건)")
+            st.success(f"Slack 알림 발송 완료! ({len(jobs)}건) — 필요하면 다시 발송할 수 있습니다.")
+            # '마지막 발송' 컬럼 갱신
+            st.session_state.upcoming_jobs = service.find_upcoming(config.NOTIFY_DAYS_BEFORE)
         else:
             st.error("Slack Webhook URL이 설정되지 않았거나 발송에 실패했습니다.")
 
