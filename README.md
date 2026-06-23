@@ -293,21 +293,45 @@ python src/main.py notify
 
 # 마감 임박 + 지원 후속 알림 (자동, cron용)
 python src/main.py notify --auto
+
+# 키워드로 채용 플랫폼을 검색해 신규 공고 자동 수집 (신규 기능)
+python src/main.py autocollect                          # 시트/config 키워드 + 전체 플랫폼
+python src/main.py autocollect -k "AI Engineer" -p 잡코리아 -l 5
+python src/main.py autocollect --auto                   # 확인 없이 (cron용)
 ```
 
 ### 상태 종류
 
 | 상태 | 의미 |
 |------|------|
-| `interest` | 관심 (기본값) |
-| `applied` | 지원 완료 |
-| `document_pass` | 서류 합격 |
-| `interview` | 면접 |
-| `final_pass` | 최종 합격 |
+| `interest` | 관심공고 (기본값) |
+| `applied` | 지원완료 |
+| `document_fail` | 서류탈락 |
+| `document_pass` | 서류합격 |
+| `interview` | 면접예정 |
+| `interview_fail` | 면접탈락 |
+| `final_pass` | 최종합격 |
 | `rejected` | 불합격 |
 | `hold` | 보류 |
 
 > 이전 버전의 `closed`(마감) 값은 표시상 계속 인식되지만, 신규 선택지에서는 제외되었습니다.
+
+## 키워드 자동 수집 (신규)
+
+URL을 직접 붙여넣지 않아도, 키워드로 채용 플랫폼을 검색해 **신규 공고를 스스로 발견·수집**합니다.
+
+- **대상 플랫폼**: 원티드 · 사람인 · 잡코리아 (전용 파서 보유). 점핏은 다음 단계, 로켓펀치는 봇 차단으로 제외.
+- **중복 제거(2단계)**: ① 발견한 URL을 로컬 캐시 + 시트와 대조하고, ② 수집 후 **동일 회사 + 동일 직무**가 이미 있으면(시트 기존분 + 이번 실행분) 저장하지 않습니다. URL이 달라도 같은 공고면 중복으로 처리합니다.
+- **기존 수동 수집과 병행**: 자동 수집한 공고는 같은 시트에 저장되며, `수집방식` 컬럼으로 자동/수동을 구분합니다(목록·상세 모달에 표시).
+- **검색 키워드**: 기본값은 `config.py`의 `AUTOCOLLECT_KEYWORDS`(AX, 바이브코딩, AI기획, AI Engineer, LLM, Prompt Engineer, AI Product Manager). 코드 수정 없이 바꾸려면 Google Sheets에 **`키워드 관리`** 탭을 만들고 첫 행에 `키워드`(필수)·`사용`(선택) 헤더를 둔 뒤 키워드를 한 줄씩 적으면 됩니다(시트가 있으면 시트 우선, 없으면 config 기본값).
+
+```bash
+# 기본 키워드 + 전체 플랫폼으로 1회 실행
+python src/main.py autocollect
+
+# 특정 키워드/플랫폼만, 키워드×플랫폼 당 최대 5건
+python src/main.py autocollect -k "AI Engineer" -p 잡코리아 -l 5
+```
 
 ## 매일 자동으로 알림 받기 (선택사항)
 
@@ -317,12 +341,18 @@ python src/main.py notify --auto
 # cron 설정 열기
 crontab -e
 
-# 아래 줄 추가 (매일 아침 8시에 실행)
+# 아래 줄 추가 (매일 아침 8시 마감/후속 알림)
 0 8 * * * /프로젝트경로/jobmate-ai/scripts/cron_notify.sh
+
+# 키워드 자동 수집 (1일 2회: 오전 9시 / 오후 6시) — 신규 기능
+0 9  * * * /프로젝트경로/jobmate-ai/scripts/cron_autocollect.sh
+0 18 * * * /프로젝트경로/jobmate-ai/scripts/cron_autocollect.sh
 ```
 
 > `/프로젝트경로/`는 실제 프로젝트가 있는 경로로 바꿔주세요.
 > 경로를 모르겠으면 프로젝트 폴더에서 `pwd` 명령어를 입력하면 확인할 수 있습니다.
+>
+> ⚠️ **macOS 자동 수집 주의**: 사람인은 봇 감지로 보이는 브라우저(headless=False)가 필요합니다. cron이 뜰 때 GUI 로그인 세션이 있어야 하며(09:00/18:00은 보통 충족), 프로젝트가 `~/Desktop` 하위면 '전체 디스크 접근 권한' 부여 또는 Desktop 밖으로 이동이 필요할 수 있습니다. (마감 알림 cron은 브라우저를 쓰지 않아 영향 없음.)
 
 ---
 
@@ -369,26 +399,34 @@ jobmate-ai/
 ├── credentials.json     # Google 인증 파일 (GitHub 제외)
 ├── src/                 # 앱 소스
 │   ├── app.py           # 웹 화면 (Streamlit)
-│   ├── main.py          # 터미널 프로그램 (인터랙티브 + add/list/notify/status)
-│   ├── service.py       # 공통 로직 (웹·터미널 공유) + 대시보드 집계
+│   ├── main.py          # 터미널 프로그램 (인터랙티브 + add/list/notify/status/autocollect)
+│   ├── service.py       # 공통 로직 (웹·터미널 공유) + 대시보드 집계 + 자동 수집 오케스트레이션
 │   ├── classify.py      # 규칙 기반 직군 분류 (Backend/Data/AI 등)
-│   ├── config.py        # 설정값 (경로·시크릿)
+│   ├── config.py        # 설정값 (경로·시크릿·자동 수집 키워드/플랫폼)
 │   ├── sheets.py        # Google Sheets 연동
 │   ├── slack.py         # Slack 알림
-│   └── parsers/         # 사이트별 크롤링 모듈
-│       ├── base.py      # 공통 인터페이스 + 유틸리티
-│       ├── wanted.py    # 원티드 전용
-│       ├── saramin.py   # 사람인 전용
-│       ├── jobkorea.py  # 잡코리아 전용 (ld+json + iframe)
-│       ├── groupby.py   # 그룹바이 전용 (__NEXT_DATA__ JSON)
-│       └── fallback.py  # 기타 사이트 (Gemini AI 자동 추출)
+│   ├── parsers/         # 사이트별 크롤링 모듈 (개별 공고 URL → JobPost)
+│   │   ├── base.py      # 공통 인터페이스 + 유틸리티
+│   │   ├── wanted.py    # 원티드 전용
+│   │   ├── saramin.py   # 사람인 전용
+│   │   ├── jobkorea.py  # 잡코리아 전용 (ld+json + iframe)
+│   │   ├── groupby.py   # 그룹바이 전용 (__NEXT_DATA__ JSON)
+│   │   └── fallback.py  # 기타 사이트 (Gemini AI 자동 추출)
+│   └── searchers/       # 키워드 검색 모듈 (키워드 → 개별 공고 URL 목록) [신규]
+│       ├── base.py      # 검색기 인터페이스 + URL 추출 순수 함수
+│       ├── wanted.py    # 원티드 검색 (SPA 스크롤)
+│       ├── saramin.py   # 사람인 검색 (headless=False)
+│       └── jobkorea.py  # 잡코리아 검색 (서버 렌더링)
 ├── tests/               # 테스트 스크립트
 │   ├── test_parsers.py           # 전용 파서 테스트
 │   ├── test_fallback.py          # 폴백 파서 테스트
 │   ├── test_classify.py          # 직군 분류 테스트
-│   └── test_dashboard_summary.py # 대시보드 집계(플랫폼/최근/인사이트) 테스트
+│   ├── test_dashboard_summary.py # 대시보드 집계(플랫폼/최근/인사이트) 테스트
+│   ├── test_searchers.py         # 검색기 URL 추출 + 파서 계약 테스트 [신규]
+│   └── test_auto_collect.py      # 자동 수집 오케스트레이션 테스트 [신규]
 ├── scripts/
-│   └── cron_notify.sh   # 자동 알림 스크립트 (cron)
+│   ├── cron_notify.sh       # 자동 알림 스크립트 (cron)
+│   └── cron_autocollect.sh  # 키워드 자동 수집 스크립트 (cron, 1일 2회) [신규]
 ├── data/                # 런타임 (GitHub 제외)
 │   ├── cache.json       # 중복 방지용 캐시
 │   └── jobmate.log      # 실행 로그

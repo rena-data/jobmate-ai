@@ -11,6 +11,7 @@ import asyncio
 import concurrent.futures
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -28,6 +29,9 @@ from parsers.saramin import SaraminParser
 from parsers.jobkorea import JobkoreaParser
 from parsers.groupby import GroupbyParser
 from parsers.fallback import FallbackParser
+from searchers.wanted import WantedSearcher
+from searchers.saramin import SaraminSearcher
+from searchers.jobkorea import JobkoreaSearcher
 import sheets
 import slack
 
@@ -41,15 +45,25 @@ PARSERS = [
     FallbackParser(),  # 항상 마지막 (폴백)
 ]
 
+# 검색기 등록 (자동 수집 — 전용 파서 보유 플랫폼만). PARSERS와 동일한 레지스트리 패턴.
+# 점핏은 전용 상세 파서 부재로 다음 라운드, 로켓펀치는 CloudFront 봇차단으로 제외.
+SEARCHERS = [
+    WantedSearcher(),
+    SaraminSearcher(),
+    JobkoreaSearcher(),
+]
+
 # 상태 값 재노출 (sheets.VALID_STATUSES와 동일)
 VALID_STATUSES = sheets.VALID_STATUSES
 
 # 상태 → 한글 라벨 (UI 공용). "closed"는 레거시 시트값 표시용.
 STATUS_LABELS = {
-    "interest": "관심",
+    "interest": "관심공고",
     "applied": "지원완료",
+    "document_fail": "서류탈락",
     "document_pass": "서류합격",
-    "interview": "면접",
+    "interview": "면접예정",
+    "interview_fail": "면접탈락",
     "final_pass": "최종합격",
     "rejected": "불합격",
     "hold": "보류",
@@ -113,6 +127,11 @@ def load_cache() -> list[dict]:
 def save_cache(cache: list[dict]) -> None:
     with open(config.CACHE_FILE, "w") as f:
         json.dump(cache, f, ensure_ascii=False, indent=2)
+
+
+def clear_cache() -> None:
+    """로컬 캐시(cache.json)를 비운다. 시트는 보존(중복검사는 시트로도 동작)."""
+    save_cache([])
 
 
 def is_cached(url: str) -> bool:
@@ -265,6 +284,188 @@ def save(post: JobPost) -> None:
     """Google Sheets 저장 + 로컬 캐시 추가 (기존 main.py:177-178)."""
     sheets.save_job_post(post)
     add_to_cache(post)
+
+
+# ---------------------------------------------------------------------------
+# 자동 수집 (auto-collect) — 신규 기능.
+# 키워드로 플랫폼을 검색해 신규 공고 URL을 발견하고, 기존 collect()/save()
+# 파이프라인으로 수집한다. 기존 수동 수집 경로는 한 줄도 바꾸지 않는다.
+# ---------------------------------------------------------------------------
+@dataclass
+class AutoCollectItem:
+    """자동 수집 후보 1건의 처리 결과."""
+
+    keyword: str
+    platform: str
+    url: str
+    outcome: str  # "new" | "duplicate" | "failed"
+    company: str = ""
+    position: str = ""
+    error: str | None = None
+
+
+@dataclass
+class AutoCollectStats:
+    """키워드 × 플랫폼 단위 집계."""
+
+    keyword: str
+    platform: str
+    discovered: int = 0
+    new: int = 0
+    duplicate: int = 0
+    failed: int = 0
+
+
+@dataclass
+class AutoCollectResult:
+    """auto_collect() 전체 결과 (UI/CLI가 인쇄)."""
+
+    items: list[AutoCollectItem] = field(default_factory=list)
+    stats: list[AutoCollectStats] = field(default_factory=list)
+    discovered: int = 0
+    new: int = 0
+    duplicate: int = 0
+    failed: int = 0
+    errors: list[str] = field(default_factory=list)  # 검색기 레벨 실패
+
+
+def resolve_keywords() -> list[str]:
+    """검색 키워드 결정: Google Sheets '키워드 관리' 탭 우선, 없으면 config 기본값."""
+    try:
+        kws = sheets.get_keywords()
+    except Exception:
+        kws = []
+    return kws or list(config.AUTOCOLLECT_KEYWORDS)
+
+
+def save_keywords(keywords: list[str]) -> None:
+    """검색 키워드 목록을 '키워드 관리' 시트에 저장 (resolve_keywords가 읽음)."""
+    sheets.save_keywords(keywords)
+
+
+def discover(keyword: str, platform: str, limit: int) -> list[str]:
+    """keyword × platform → 후보 상세 URL 리스트. 매칭 검색기 없으면 빈 리스트.
+
+    검색기는 async이므로 collect()와 동일하게 _run_async로 격리 실행한다.
+    """
+    for s in SEARCHERS:
+        if s.can_search(platform):
+            return _run_async(s.search(keyword, limit))
+    return []
+
+
+def save_auto(post: JobPost, *, keyword: str, platform: str) -> None:
+    """자동 수집 저장: 기존 save()로 행 추가 후 자동 메타데이터를 태깅."""
+    save(post)
+    sheets.annotate_collection(
+        post.url, search_keyword=keyword, platform=platform,
+        is_new="Y", method="자동",
+    )
+
+
+def _job_key(company: str, position: str) -> str | None:
+    """회사+직무 정규화 키(공백 축약 + 소문자). 둘 다 비면 None(중복판정 제외)."""
+    c = re.sub(r"\s+", " ", (company or "").strip()).lower()
+    p = re.sub(r"\s+", " ", (position or "").strip()).lower()
+    if not c and not p:
+        return None
+    return f"{c}|{p}"
+
+
+def auto_collect(
+    keywords: list[str],
+    platforms: list[str] | None = None,
+    limit_per: int | None = None,
+) -> AutoCollectResult:
+    """키워드로 플랫폼을 검색해 신규 공고만 자동 수집한다.
+
+    중복 제거 2단계:
+      1) URL 기준 — 캐시(is_cached) + 시트 URL 스냅샷. collect 비용 전에 차단.
+      2) 회사+직무 기준 — 수집 후 (회사,직무)가 시트/이번 실행에 이미 있으면 저장 스킵.
+         URL이 달라도 동일 회사·동일 직무면 중복으로 본다.
+    검색기 실패는 result.errors에 담고 다음 키워드/플랫폼으로 계속 진행한다.
+    """
+    platforms = platforms or [s.platform_name for s in SEARCHERS]
+    limit_per = limit_per or config.AUTOCOLLECT_LIMIT_PER
+    result = AutoCollectResult()
+
+    # 시작 시 시트를 1회만 읽어 URL/(회사,직무) 스냅샷 구축 (URL당 반복 조회 방지)
+    seen_urls: set[str] = set()
+    seen_jobs: set[str] = set()
+    try:
+        for r in sheets.get_all_posts():
+            u = str(r.get("URL", "") or "")
+            if u:
+                seen_urls.add(u)
+            jk = _job_key(str(r.get("회사명", "")), str(r.get("포지션", "")))
+            if jk:
+                seen_jobs.add(jk)
+    except Exception as e:
+        result.errors.append(f"기존 시트 조회 실패(중복검사 일부 제한): {e}")
+
+    for kw in keywords:
+        for plat in platforms:
+            stat = AutoCollectStats(keyword=kw, platform=plat)
+            try:
+                candidates = discover(kw, plat, limit_per)
+            except Exception as e:
+                result.errors.append(f"{plat} / '{kw}' 검색 실패: {e}")
+                result.stats.append(stat)
+                continue
+
+            for url in candidates:
+                stat.discovered += 1
+                canonical = canonicalize_url(url)
+
+                # 1단계: URL 중복 — collect 비용(robots/딜레이/Playwright) 전에 차단
+                if is_cached(canonical) or canonical in seen_urls:
+                    stat.duplicate += 1
+                    result.items.append(AutoCollectItem(kw, plat, canonical, "duplicate"))
+                    continue
+
+                cr = collect(canonical)
+                if cr.post is None:
+                    if cr.already_cached:  # 검사~수집 사이 레이스 방어
+                        stat.duplicate += 1
+                        result.items.append(AutoCollectItem(kw, plat, canonical, "duplicate"))
+                    else:
+                        stat.failed += 1
+                        result.items.append(
+                            AutoCollectItem(kw, plat, canonical, "failed", error=cr.error)
+                        )
+                    continue
+
+                # 2단계: 회사+직무 중복 — URL이 달라도 동일 공고면 저장 스킵
+                jkey = _job_key(cr.post.company, cr.post.position)
+                if jkey is not None and jkey in seen_jobs:
+                    stat.duplicate += 1
+                    result.items.append(
+                        AutoCollectItem(
+                            kw, plat, canonical, "duplicate",
+                            company=cr.post.company, position=cr.post.position,
+                        )
+                    )
+                    continue
+
+                save_auto(cr.post, keyword=kw, platform=plat)
+                seen_urls.add(canonical)
+                if jkey is not None:
+                    seen_jobs.add(jkey)
+                stat.new += 1
+                result.items.append(
+                    AutoCollectItem(
+                        kw, plat, canonical, "new",
+                        company=cr.post.company, position=cr.post.position,
+                    )
+                )
+
+            result.stats.append(stat)
+            result.discovered += stat.discovered
+            result.new += stat.new
+            result.duplicate += stat.duplicate
+            result.failed += stat.failed
+
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -293,9 +293,89 @@ def notify(
 
 
 @app.command()
+def autocollect(
+    keyword: list[str] = typer.Option(
+        None, "--keyword", "-k",
+        help="검색 키워드 (반복 지정 가능). 미지정 시 '키워드 관리' 시트/config 기본값 사용",
+    ),
+    platform: list[str] = typer.Option(
+        None, "--platform", "-p",
+        help="대상 플랫폼 (원티드/사람인/잡코리아). 미지정 시 전체",
+    ),
+    limit: int = typer.Option(None, "--limit", "-l", help="키워드×플랫폼 당 최대 신규 수"),
+    auto: bool = typer.Option(False, "--auto", "-a", help="확인 없이 실행 (cron용)"),
+):
+    """키워드로 채용 플랫폼을 검색해 신규 공고를 자동 수집합니다 (신규 기능)."""
+    keywords = list(keyword) if keyword else service.resolve_keywords()
+    platforms = list(platform) if platform else list(config.AUTOCOLLECT_PLATFORMS)
+    limit_per = limit or config.AUTOCOLLECT_LIMIT_PER
+
+    logger.info(f"autocollect 시작: keywords={keywords} platforms={platforms} limit={limit_per}")
+
+    console.print(Panel.fit(
+        f"[bold]키워드[/bold]: {', '.join(keywords)}\n"
+        f"[bold]플랫폼[/bold]: {', '.join(platforms)}\n"
+        f"[bold]키워드×플랫폼 당 최대[/bold]: {limit_per}건\n"
+        f"[dim]예상 작업: 최대 {len(keywords) * len(platforms) * limit_per}건 상세 수집[/dim]",
+        title="자동 수집 설정",
+    ))
+
+    if not auto:
+        if not typer.confirm("검색 + 자동 수집을 시작하시겠습니까?"):
+            console.print("[dim]취소되었습니다.[/dim]")
+            raise typer.Exit()
+
+    try:
+        with console.status("[cyan]키워드 검색 + 수집 중...[/cyan]", spinner="dots"):
+            result = service.auto_collect(keywords, platforms, limit_per)
+    except KeyboardInterrupt:
+        console.print("\n[dim]중단되었습니다.[/dim]")
+        raise typer.Exit()
+
+    # 키워드 × 플랫폼 통계
+    table = Table(title="자동 수집 결과")
+    table.add_column("키워드", style="bold")
+    table.add_column("플랫폼")
+    table.add_column("발견", justify="right")
+    table.add_column("신규", justify="right", style="green bold")
+    table.add_column("중복", justify="right", style="dim")
+    table.add_column("실패", justify="right", style="red")
+    for s in result.stats:
+        table.add_row(
+            s.keyword, s.platform, str(s.discovered),
+            str(s.new), str(s.duplicate), str(s.failed),
+        )
+    console.print(table)
+
+    # 신규 수집 공고 목록
+    new_items = [it for it in result.items if it.outcome == "new"]
+    if new_items:
+        nt = Table(title=f"신규 수집 공고 ({len(new_items)}건)")
+        nt.add_column("플랫폼")
+        nt.add_column("회사", style="bold")
+        nt.add_column("포지션")
+        for it in new_items:
+            nt.add_row(it.platform, it.company or "-", it.position or "-")
+        console.print(nt)
+
+    # 검색기 레벨 오류
+    for err in result.errors:
+        console.print(f"[red]⚠ {err}[/red]")
+
+    console.print(
+        f"[green]완료[/green] — 발견 {result.discovered} / 신규 {result.new} / "
+        f"중복 {result.duplicate} / 실패 {result.failed}"
+    )
+    logger.info(
+        f"autocollect 완료: discovered={result.discovered} new={result.new} "
+        f"dup={result.duplicate} failed={result.failed} errors={len(result.errors)}"
+    )
+
+
+@app.command()
 def status(
     url: str = typer.Argument(..., help="상태를 변경할 공고 URL"),
-    new_status: str = typer.Argument(..., help="변경할 상태 (interest/applied/document_pass/interview/final_pass/rejected/hold)"),
+    new_status: str = typer.Argument(..., help="변경할 상태 (interest/applied/document_fail/document_pass/interview/interview_fail/final_pass/rejected/hold)"),
 ):
     """공고의 지원 상태를 변경합니다."""
     if new_status not in service.VALID_STATUSES:
